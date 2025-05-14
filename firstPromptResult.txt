@@ -1,0 +1,634 @@
+
+you have gave me this code
+
+Okay, this is an exciting plan! Building a FastAPI service to accept a CSV, train models (LSTM and Polynomial Regression), and return results including plots is a solid project.
+
+Let's break down how you can structure the Python backend for this with FastAPI.
+
+Project Structure (Python Side):
+
+fastapi_ml_service/
+├── main.py                     # FastAPI app and routes
+├── models/
+│   ├── lstm_model.py           # LSTM model logic
+│   └── polynomial_model.py     # Polynomial regression logic
+├── utils/
+│   ├── data_processing.py    # CSV loading, preprocessing
+│   └── plotting.py           # Matplotlib plotting functions
+├── static/                     # To store generated plot images
+│   └── plots/
+├── requirements.txt            # Python dependencies
+└── .env                        # (Optional) for environment variables
+
+requirements.txt
+
+fastapi
+uvicorn[standard]
+pandas
+numpy
+scikit-learn
+tensorflow
+matplotlib
+python-multipart # For file uploads
+
+
+main.py (FastAPI Application)
+import os
+import shutil
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse, FileResponse
+from pydantic import BaseModel
+import pandas as pd
+import uuid # For unique filenames/run IDs
+from datetime import datetime, timedelta
+import io
+
+# --- ADD THIS IMPORT ---
+from sklearn.metrics import mean_absolute_error, r2_score
+# -----------------------
+
+# Import your model and utility functions
+from models.lstm_model import (
+    train_lstm_model,
+    predict_lstm_future,
+    evaluate_lstm_model
+)
+from models.polynomial_model import (
+    train_polynomial_model,
+    predict_polynomial_future,
+    evaluate_polynomial_model
+)
+from utils.data_processing import preprocess_data
+from utils.plotting import (
+    plot_test_predictions,
+    plot_future_predictions,
+    plot_polynomial_regression
+)
+
+# Configuration
+SEQUENCE_LENGTH = 100 # For LSTM
+N_FUTURE_DAYS_PREDICTION = 30
+LSTM_EPOCHS = 10 # As requested
+POLYNOMIAL_DEGREE = 5 # Example, can be tuned or passed as param
+
+# Ensure static directories exist
+STATIC_DIR = "static"
+PLOTS_DIR = os.path.join(STATIC_DIR, "plots")
+os.makedirs(PLOTS_DIR, exist_ok=True)
+
+app = FastAPI(title="Stock Prediction ML Service")
+
+# --- Helper Function to clean up old plots ---
+def cleanup_old_plots(max_age_minutes=60):
+    now = datetime.now()
+    for filename in os.listdir(PLOTS_DIR):
+        file_path = os.path.join(PLOTS_DIR, filename)
+        try:
+            file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+            if (now - file_mod_time) > timedelta(minutes=max_age_minutes):
+                os.remove(file_path)
+                print(f"Cleaned up old plot: {filename}")
+        except Exception as e:
+            print(f"Error cleaning up plot {filename}: {e}")
+
+
+class TrainResponse(BaseModel):
+    message: str
+    run_id: str
+    lstm_results: dict
+    polynomial_results: dict
+    plot_urls: dict
+
+@app.post("/train-predict/", response_model=TrainResponse)
+async def train_and_predict_models(
+    background_tasks: BackgroundTasks,
+    csv_file: UploadFile = File(...)
+):
+    run_id = str(uuid.uuid4())
+    results = {
+        "message": "Processing started.",
+        "run_id": run_id,
+        "lstm_results": {},
+        "polynomial_results": {},
+        "plot_urls": {}
+    }
+
+    try:
+        # 1. Read and Preprocess CSV
+        contents = await csv_file.read()
+        df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
+
+        # Ensure 'Date' is datetime and not index, 'Close' is numeric
+        if 'Date' not in df.columns or 'Close' not in df.columns:
+            raise HTTPException(status_code=400, detail="CSV must contain 'Date' and 'Close' columns.")
+
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.sort_values(by='Date', inplace=True)
+        df.reset_index(drop=True, inplace=True) # Ensure Date is not index
+        df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+        df.dropna(subset=['Close'], inplace=True)
+
+        if len(df) < SEQUENCE_LENGTH + 10: # Minimum data for train/test/future
+             raise HTTPException(status_code=400, detail=f"Not enough data. Need at least {SEQUENCE_LENGTH + 10} rows after cleaning.")
+
+        train_df, test_df, scaler = preprocess_data(df.copy(), sequence_length=SEQUENCE_LENGTH) # Use a copy
+
+        # --- LSTM Model ---
+        print(f"[{run_id}] Training LSTM model...")
+        lstm_model, lstm_history = train_lstm_model(
+            train_df,
+            scaler,
+            sequence_length=SEQUENCE_LENGTH,
+            epochs=LSTM_EPOCHS
+        )
+        print(f"[{run_id}] LSTM model training complete.")
+
+        # LSTM Test Set Evaluation
+        y_test_actual_lstm, y_pred_test_lstm, x_test_lstm = evaluate_lstm_model(
+            lstm_model,
+            test_df,
+            train_df, # Pass train_df for last sequence
+            scaler,
+            sequence_length=SEQUENCE_LENGTH
+        )
+        results["lstm_results"]["test_metrics"] = {
+            "mae": float(mean_absolute_error(y_test_actual_lstm, y_pred_test_lstm)),
+            "r2_score": float(r2_score(y_test_actual_lstm, y_pred_test_lstm))
+        }
+
+        # LSTM Future Predictions
+        future_preds_lstm, future_dates_lstm = predict_lstm_future(
+            lstm_model,
+            df, # Full dataframe for last sequence
+            scaler,
+            sequence_length=SEQUENCE_LENGTH,
+            n_future_days=N_FUTURE_DAYS_PREDICTION
+        )
+        results["lstm_results"]["future_predictions"] = {
+            str(date.date()): float(pred) for date, pred in zip(future_dates_lstm, future_preds_lstm.flatten())
+        }
+
+        # LSTM Plotting
+        lstm_plot_test_path = os.path.join(PLOTS_DIR, f"{run_id}_lstm_test_predictions.png")
+        plot_test_predictions(
+            test_df['Date'],
+            y_test_actual_lstm,
+            y_pred_test_lstm,
+            title="LSTM: Test Set Predictions",
+            save_path=lstm_plot_test_path
+        )
+        results["plot_urls"]["lstm_test_plot"] = f"/static/plots/{run_id}_lstm_test_predictions.png"
+
+        lstm_plot_future_path = os.path.join(PLOTS_DIR, f"{run_id}_lstm_future_predictions.png")
+        plot_future_predictions(
+            df['Date'],
+            df['Close'],
+            test_df['Date'], # Dates for test predictions
+            y_pred_test_lstm, # Test predictions
+            future_dates_lstm,
+            future_preds_lstm,
+            title="LSTM: Historical, Test & Future Predictions",
+            save_path=lstm_plot_future_path
+        )
+        results["plot_urls"]["lstm_future_plot"] = f"/static/plots/{run_id}_lstm_future_predictions.png"
+
+
+        # --- Polynomial Regression Model ---
+        # print(f"[{run_id}] Training Polynomial Regression model...")
+        # poly_model, poly_scaler, time_feature_train, X_poly_train, y_poly_train = train_polynomial_model(
+        #     train_df.copy(), # Use a copy
+        #     degree=POLYNOMIAL_DEGREE
+        # )
+        
+        
+        # NEW corrected line in main.py:
+        poly_model, poly_scaler, X_train_poly_time_feature, y_train_poly_scaled = train_polynomial_model(
+            train_df.copy(),
+            degree=POLYNOMIAL_DEGREE
+        )
+        # You can then use X_train_poly_time_feature if you need the 'Time' feature DataFrame (which is X_train from the function)
+        # and y_train_poly_scaled is the scaled target variable from training.
+        # For the current logic, these returned training features/targets (X_train_poly_time_feature, y_train_poly_scaled)
+        # are not directly used later in the main.py flow, but it's good to unpack correctly.
+
+
+        print(f"[{run_id}] Polynomial Regression model training complete.")
+
+        # Polynomial Test Set Evaluation
+        y_test_actual_poly, y_pred_test_poly = evaluate_polynomial_model(
+            poly_model,
+            test_df.copy(), # Use a copy
+            poly_scaler,
+            degree=POLYNOMIAL_DEGREE
+        )
+        results["polynomial_results"]["test_metrics"] = {
+            "mae": float(mean_absolute_error(y_test_actual_poly, y_pred_test_poly)),
+            "r2_score": float(r2_score(y_test_actual_poly, y_pred_test_poly))
+        }
+
+        # Polynomial Future Predictions
+        future_preds_poly, future_dates_poly = predict_polynomial_future(
+            poly_model,
+            df, # Full dataframe for last date
+            poly_scaler,
+            degree=POLYNOMIAL_DEGREE,
+            n_future_days=N_FUTURE_DAYS_PREDICTION
+        )
+        results["polynomial_results"]["future_predictions"] = {
+            str(date.date()): float(pred) for date, pred in zip(future_dates_poly, future_preds_poly.flatten())
+        }
+
+        # Polynomial Plotting
+        poly_plot_path = os.path.join(PLOTS_DIR, f"{run_id}_polynomial_regression.png")
+        plot_polynomial_regression(
+            df['Date'], df['Close'], # All historical data
+            test_df['Date'], y_pred_test_poly, # Test predictions
+            future_dates_poly, future_preds_poly,
+            title=f"Polynomial Regression (Degree {POLYNOMIAL_DEGREE})",
+            save_path=poly_plot_path
+        )
+        results["plot_urls"]["polynomial_plot"] = f"/static/plots/{run_id}_polynomial_regression.png"
+
+
+        results["message"] = "Processing complete."
+        background_tasks.add_task(cleanup_old_plots) # Schedule cleanup
+        return results
+
+    except HTTPException as e:
+        raise e # Re-raise HTTP exceptions
+    except Exception as e:
+        print(f"[{run_id}] Error during processing: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+# --- Mount static directory to serve plots ---
+from fastapi.staticfiles import StaticFiles
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to the Stock Prediction ML Service. POST to /train-predict/ with a CSV file."}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+models/lstm_model.py
+
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dropout, Dense
+from datetime import timedelta
+
+def create_lstm_sequences(data_scaled, sequence_length):
+x, y = [], []
+for i in range(sequence_length, len(data_scaled)):
+x.append(data_scaled[i-sequence_length:i, 0])
+y.append(data_scaled[i, 0])
+return np.array(x), np.array(y)
+
+def train_lstm_model(train_df, scaler, sequence_length, epochs=3, batch_size=32):
+# Scaler should already be fitted on train_df['Close'] in data_processing
+scaled_train_close = scaler.transform(train_df[['Close']])
+
+x_train, y_train = create_lstm_sequences(scaled_train_close, sequence_length)
+x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+
+model = Sequential([
+    LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1), activation='relu'),
+    Dropout(0.2),
+    LSTM(units=60, return_sequences=True, activation='relu'),
+    Dropout(0.3),
+    LSTM(units=80, return_sequences=True, activation='relu'),
+    Dropout(0.4),
+    LSTM(units=120, activation='relu'),
+    Dropout(0.5),
+    Dense(units=1)
+])
+model.compile(optimizer='adam', loss='mean_squared_error')
+history = model.fit(x_train, y_train, epochs=epochs, batch_size=batch_size, verbose=1)
+return model, history
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+def evaluate_lstm_model(model, test_df, train_df_for_sequence, scaler, sequence_length):
+# Prepare test data
+last_sequence_from_train_scaled = scaler.transform(train_df_for_sequence[['Close']])[-sequence_length:]
+test_close_scaled = scaler.transform(test_df[['Close']])
+
+combined_input_scaled = np.concatenate((last_sequence_from_train_scaled, test_close_scaled), axis=0)
+
+x_test, y_test_actual_scaled = create_lstm_sequences(combined_input_scaled, sequence_length)
+x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
+
+y_pred_test_scaled = model.predict(x_test)
+
+y_pred_test_rescaled = scaler.inverse_transform(y_pred_test_scaled)
+y_test_actual_rescaled = scaler.inverse_transform(y_test_actual_scaled.reshape(-1,1))
+
+return y_test_actual_rescaled, y_pred_test_rescaled, x_test # Return x_test if needed for other things
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+def predict_lstm_future(model, full_df, scaler, sequence_length, n_future_days):
+# Use the last 'sequence_length' days from the entire dataset (scaled)
+last_sequence_scaled = scaler.transform(full_df[['Close']])[-sequence_length:]
+current_sequence_for_model = last_sequence_scaled.reshape(1, sequence_length, 1)
+
+future_predictions_scaled = []
+for _ in range(n_future_days):
+    next_pred_scaled = model.predict(current_sequence_for_model)
+    future_predictions_scaled.append(next_pred_scaled[0, 0])
+    # Update sequence: append new prediction, drop oldest
+    new_sequence_part = np.append(current_sequence_for_model[0, 1:, 0], next_pred_scaled[0,0])
+    current_sequence_for_model = new_sequence_part.reshape(1, sequence_length, 1)
+
+future_predictions_rescaled = scaler.inverse_transform(np.array(future_predictions_scaled).reshape(-1, 1))
+
+last_date = full_df['Date'].iloc[-1]
+future_dates = pd.to_datetime([last_date + timedelta(days=i) for i in range(1, n_future_days + 1)])
+
+return future_predictions_rescaled, future_dates
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+models/polynomial_model.py
+
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import PolynomialFeatures, MinMaxScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import make_pipeline
+from datetime import timedelta
+
+def train_polynomial_model(train_df, degree=3):
+train_df = train_df.copy()
+# Create a time feature (e.g., days since the start)
+train_df['Time'] = (train_df['Date'] - train_df['Date'].min()).dt.days
+
+X_train = train_df[['Time']]
+y_train = train_df['Close'].values.reshape(-1, 1)
+
+# Scale target variable for stability if needed, or scale input 'Time'
+# Here, we'll scale y for consistency with LSTM approach and inverse transform predictions
+y_scaler = MinMaxScaler()
+y_train_scaled = y_scaler.fit_transform(y_train)
+
+# Create polynomial features and fit the model
+# The pipeline handles feature transformation and regression
+poly_model = make_pipeline(PolynomialFeatures(degree), LinearRegression())
+poly_model.fit(X_train, y_train_scaled)
+
+return poly_model, y_scaler, X_train, y_train_scaled # Return X_train for plotting if needed
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+def evaluate_polynomial_model(model, test_df, y_scaler, degree=3):
+test_df = test_df.copy()
+test_df['Time'] = (test_df['Date'] - test_df['Date'].min()).dt.days # Relative to test start for consistency with how it might be used
+# OR better: use Time from start of entire dataset
+# For now, using test_df's min date for Time feature in test
+# This assumes Time is number of days from its own dataset start
+# This needs careful handling if train/test 'Time' need to be aligned
+
+# A more robust way for 'Time' feature for test_df:
+# It should be relative to the *original* training data's start date.
+# This requires passing the original min_date or the transformed time feature.
+# For simplicity in this example, let's assume Time can be calculated for test_df like this:
+# (This is a common point of error if not handled carefully in time series with poly reg)
+
+# To make it more robust, let's assume the Time feature for testing should continue from training
+# This requires access to the last time step of training or min_date of train.
+# Let's assume test_df['Date'].min() is the first day AFTER train_df['Date'].max() for 'Time' continuity
+# If `train_df` was passed, we could get train_df['Date'].min()
+# For now, this simple relative time for test is used.
+
+X_test = test_df[['Time']]
+y_test_actual = test_df['Close'].values.reshape(-1,1) # Original scale
+
+y_pred_test_scaled = model.predict(X_test)
+y_pred_test_rescaled = y_scaler.inverse_transform(y_pred_test_scaled.reshape(-1,1))
+
+return y_test_actual, y_pred_test_rescaled
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+def predict_polynomial_future(model, full_df, y_scaler, degree, n_future_days):
+# Create future 'Time' features
+last_date_in_full_df = full_df['Date'].iloc[-1]
+original_min_date = full_df['Date'].min() # Min date from the entire dataset for 'Time' reference
+
+future_time_features = []
+future_dates = []
+for i in range(1, n_future_days + 1):
+    future_d = last_date_in_full_df + timedelta(days=i)
+    future_dates.append(future_d)
+    time_val = (future_d - original_min_date).days
+    future_time_features.append([time_val])
+    
+X_future = pd.DataFrame(future_time_features, columns=['Time'])
+
+future_preds_scaled = model.predict(X_future)
+future_preds_rescaled = y_scaler.inverse_transform(future_preds_scaled.reshape(-1,1))
+
+return future_preds_rescaled, pd.to_datetime(future_dates)
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+utils/data_processing.py
+
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+
+def preprocess_data(df, sequence_length, train_split_ratio=0.8):
+# df already has 'Date' as datetime and sorted, 'Close' is numeric
+
+# Splitting data
+train_size = int(len(df) * train_split_ratio)
+train_df = df.iloc[:train_size].copy()
+test_df = df.iloc[train_size:].copy().reset_index(drop=True)
+
+# Scaler for LSTM (and potentially for Poly if we scale target there)
+# Fit scaler ONLY on training data's 'Close' price
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaler.fit(train_df[['Close']]) # Fit on the 'Close' column of training data
+
+return train_df, test_df, scaler
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+utils/plotting.py
+
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg') # Use non-interactive backend for server-side plotting
+import pandas as pd
+
+def plot_test_predictions(dates_actual, y_actual, y_pred, title, save_path):
+plt.figure(figsize=(12, 6))
+plt.plot(dates_actual, y_actual, 'b-', label='Actual Price')
+plt.plot(dates_actual, y_pred, 'r-', label='Predicted Price')
+plt.title(title)
+plt.xlabel('Date')
+plt.ylabel('Price')
+plt.legend()
+plt.grid(True)
+plt.gcf().autofmt_xdate()
+plt.savefig(save_path)
+plt.close() # Close the figure to free memory
+
+def plot_future_predictions(hist_dates, hist_close,
+test_pred_dates, test_pred_close,
+future_dates, future_close, title, save_path):
+plt.figure(figsize=(15, 7))
+plt.plot(hist_dates, hist_close, 'k-', label='Historical Actual Price', alpha=0.7)
+if test_pred_dates is not None and test_pred_close is not None:
+plt.plot(test_pred_dates, test_pred_close, color='red', linestyle='-', label='Test Predicted Price')
+plt.plot(future_dates, future_close, color='green', linestyle='--', marker='o', markersize=4, label='Future Predicted Price')
+plt.title(title)
+plt.xlabel('Date')
+plt.ylabel('Price')
+plt.legend(loc='upper left')
+plt.grid(True)
+plt.gcf().autofmt_xdate()
+plt.savefig(save_path)
+plt.close()
+
+def plot_polynomial_regression(hist_dates, hist_close,
+test_pred_dates, test_pred_values,
+future_dates, future_pred_values,
+title, save_path):
+plt.figure(figsize=(15, 7))
+plt.plot(hist_dates, hist_close, 'k.', label='Historical Actual Price', alpha=0.5, markersize=3)
+
+# Combine test and future dates/preds for a continuous line if desired, or plot separately
+# For simplicity, plotting test and future separately for polynomial
+if test_pred_dates is not None and test_pred_values is not None:
+    # Sort test predictions by date if they aren't already for smooth line
+    sorted_test_indices = test_pred_dates.argsort()
+    plt.plot(test_pred_dates[sorted_test_indices], test_pred_values[sorted_test_indices], 'r-', label='Polynomial Fit (Test)', linewidth=2)
+
+if future_dates is not None and future_pred_values is not None:
+    plt.plot(future_dates, future_pred_values, 'g--', label='Polynomial Future Prediction', linewidth=2)
+    
+plt.title(title)
+plt.xlabel('Date')
+plt.ylabel('Price')
+plt.legend(loc='upper left')
+plt.grid(True)
+plt.gcf().autofmt_xdate()
+plt.savefig(save_path)
+plt.close()
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+How to Run:
+
+Save all these files in the respective directories.
+
+Install requirements: pip install -r requirements.txt
+
+Run FastAPI: uvicorn main:app --reload (from inside fastapi_ml_service directory)
+
+--reload is for development; remove it for production.
+
+Making a curl request:
+
+curl -X POST "http://127.0.0.1:8000/train-predict/" 
+-H "accept: application/json" 
+-H "Content-Type: multipart/form-data" 
+-F "csv_file=@/path/to/your/stock_data.csv"
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Bash
+IGNORE_WHEN_COPYING_END
+
+Replace /path/to/your/stock_data.csv with the actual path to your CSV file.
+
+Important Considerations and Potential Improvements:
+
+Error Handling: The provided code has basic error handling. You'll want to make it more robust.
+
+Asynchronous Operations: For long training times (even with 3 epochs, if data is large), the request will hang. Consider using Celery or FastAPI's BackgroundTasks more extensively if training becomes a bottleneck. The current BackgroundTasks is just for cleanup. True async training would be more complex.
+
+Scalability: This setup runs one model training process at a time within the FastAPI worker. For concurrent requests, you'd need multiple Uvicorn workers and potentially a more robust task queue system.
+
+Polynomial Regression Time Feature: The Time feature for polynomial regression needs careful handling. It should ideally be a continuous sequence from the start of the training data through to the future predictions. The current implementation simplifies this for the test set; review models/polynomial_model.py comments.
+
+Resource Management: Ensure your server has enough RAM/CPU for TensorFlow.
+
+Security: If this is exposed publicly, add authentication/authorization.
+
+Configuration: Move hardcoded values (epochs, sequence length, degrees) to environment variables or a config file.
+
+Logging: Implement more comprehensive logging.
+
+Plot Cleanup: The cleanup_old_plots is a simple approach. For a production system, you might store plots in cloud storage or have a more robust cleanup strategy.
+
+Input Validation: Add more validation for the CSV content (e.g., minimum number of rows, checking for non-numeric values more thoroughly).
+
+This structure gives you a strong starting point for your FastAPI ML service!

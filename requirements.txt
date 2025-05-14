@@ -5,4 +5,5 @@ numpy
 scikit-learn
 tensorflow
 matplotlib
-python-multipart # For file uploads
+python-multipart
+fpdf2 # For PDF generation
