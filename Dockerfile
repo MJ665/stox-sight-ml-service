@@ -28,12 +28,12 @@ COPY . /app
 # RUN mkdir -p /app/static/plots /app/static/pdfs && chmod -R 777 /app/static
 # However, it's generally better if the app creates these with appropriate permissions.
 
-# Tell Docker that the container listens on port 8000 (or whatever your Uvicorn runs on)
-EXPOSE 8000
+# Tell Docker that the container listens on port 7860 (or whatever your Uvicorn runs on)
+EXPOSE 7860
 
 # Define the command to run your application
 # This will be overridden by Hugging Face Spaces if you specify an app_file,
 # but it's good practice to have a CMD.
 # Note: For Spaces, it often expects the app to be run by app.py or similar.
 # We will specify the app file in the Space config later.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
