@@ -28,3 +28,17 @@ curl -X POST "http://127.0.0.1:8000/train-predict/" \
     -H "Content-Type: multipart/form-data" \
     -F "csv_file=@/Users/meet/Desktop/stox-sight/csvGenerated/test_example.com/ITC_INDIA_20250514_141615.csv" \
     -F "user_email_to_send_to=email@email.com"
+
+
+
+
+<!-- 
+
+git init
+git remote add huggingface git@hf.co:spaces/mj665/stox-sight-ml-service
+
+git add .
+git commit -m "Initial commit for Stox Sight ML Service"
+git push huggingface master  -->
+
+
