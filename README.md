@@ -35,10 +35,13 @@ curl -X POST "http://127.0.0.1:8000/train-predict/" \
 <!-- 
 
 git init
+git remote add origin git@github.com:MJ665/stox-sight-ml-service.git
 git remote add huggingface git@hf.co:spaces/mj665/stox-sight-ml-service
 
 git add .
 git commit -m "Initial commit for Stox Sight ML Service"
-git push huggingface master  -->
+git push origin master
+git push huggingface master
+  -->
 
 
