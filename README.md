@@ -6,7 +6,7 @@ colorTo: blue
 sdk: docker
 pinned: false
 app_file: main.py # Tells Spaces your main app is in main.py
-app_port: 8000    # The port your Uvicorn server listens on inside the Docker container
+app_port: 7860    # The port your Uvicorn server listens on inside the Docker container
 ---
 
 # Stox Sight - FastAPI ML Prediction Service
