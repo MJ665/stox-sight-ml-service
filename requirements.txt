@@ -2,8 +2,15 @@ fastapi
 uvicorn[standard]
 pandas
 numpy
-scikit-learn
+scikit-learn==1.5.2
 tensorflow
 matplotlib
 python-multipart
 fpdf2 # For PDF generation
+
+google-generativeai # Add this
+python-dotenv
+
+scipy # Add for loguniform and other distributions
+scikeras
+python-decouple

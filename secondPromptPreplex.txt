@@ -1,0 +1,1144 @@
+ok ok this is done now as we dicided earlier 
+i want 
+transformer_model.py
+
+and models/hybrid_cnn_gru_model.py
+
+
+i asked the perplexity ai to give me some suggestion to add some more models in the ml service application
+
+what i want is that write full code  for this also  in the randomized search cs should be used for reporting best hyper parameters
+we have to train all the type of models  (we have to keep all types of models and then put in the pdf) but for hyper parameters it is ok for randomized search cv
+we have to implement below thing
+
+here is the suggestion
+Here's an enhanced approach to improve your Stox Sight ML service with advanced models and smart hyperparameter tuning:
+
+1. Enhanced Model Architecture Suggestions
+
+Hybrid Time Series Models (Proven Combinations):
+
+# Example CNN-BiGRU with Attention (Superior to simple LSTM)
+def build_hybrid_model(input_shape):
+    inputs = Input(shape=input_shape)
+    
+    # CNN for local pattern extraction
+    x = Conv1D(64, 3, activation='relu')(inputs)
+    x = MaxPooling1D(2)(x)
+    
+    # Bidirectional GRU for temporal relationships
+    x = Bidirectional(GRU(128, return_sequences=True))(x)
+    
+    # Attention mechanism
+    x = Attention()([x,x])
+    
+    # Regression output
+    outputs = Dense(1)(x)
+    
+    model = Model(inputs, outputs)
+    model.compile(optimizer=Adam(0.001), loss='huber_loss')
+    return model
+
+
+[Key Benefits: Combines CNN's feature extraction + GRU's temporal processing + Attention focus][9][17]
+
+2. Automated Model Selection Framework
+from sklearn.ensemble import VotingRegressor
+from tensorflow.keras.wrappers.scikit_learn import KerasRegressor
+
+def auto_model_selector(X_train, y_train):
+    models = [
+        ('lstm', KerasRegressor(build_lstm_model, epochs=50)),
+        ('gru', KerasRegressor(build_gru_model, epochs=50)),
+        ('transformer', KerasRegressor(build_transformer_model, epochs=50))
+    ]
+    
+    # Automated hyperparameter search space
+    param_dist = {
+        'voting': ['soft', 'hard'],
+        'weights': [[1,1,1], [2,1,1], [1,2,1]]
+    }
+    
+    search = RandomizedSearchCV(
+        VotingRegressor(models),
+        param_dist,
+        n_iter=10,
+        cv=3
+    )
+    
+    search.fit(X_train, y_train)
+    return search.best_estimator_
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+[Benefits: Automates model selection + hyperparameter tuning][6][14]
+
+3. Advanced Hyperparameter Optimization
+
+Multi-Model RandomizedSearchCV Setup:
+
+from scipy.stats import loguniform
+
+tuning_space = {
+    'lstm': {
+        'units': [64, 128, 256],
+        'dropout': uniform(0.1, 0.3),
+        'learning_rate': loguniform(1e-4, 1e-2)
+    },
+    'gru': {
+        'units': [64, 128, 256],
+        'recurrent_dropout': uniform(0.1, 0.3),
+        'activation': ['tanh', 'relu']
+    },
+    'transformer': {
+        'num_heads': [4, 8],
+        'ff_dim': [128, 256],
+        'dropout_rate': uniform(0.1, 0.3)
+    }
+}
+
+# Automated configuration
+best_params = {}
+for model_type in ['lstm', 'gru', 'transformer']:
+    search = RandomizedSearchCV(
+        estimator=build_model(model_type),
+        param_distributions=tuning_space[model_type],
+        n_iter=15,
+        cv=3
+    )
+    search.fit(X_train, y_train)
+    best_params[model_type] = search.best_params_
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+[Optimizes multiple architectures simultaneously][5][16]
+
+4. Performance-Boosting Techniques
+
+Ensemble Stacking Architecture:
+
+# Stacking LSTM/GRU with Transformer outputs
+base_models = [
+    ('lstm', build_lstm_model(input_shape)),
+    ('transformer', build_transformer_model(input_shape))
+]
+
+meta_model = build_gru_model((None, 2))  # 2 base model outputs
+
+stacking_pipeline = StackingRegressor(
+    estimators=base_models,
+    final_estimator=meta_model,
+    cv=3
+)
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+[Combines benefits of different architectures][15][17]
+
+5. Smart Data Adaptation Layer
+# Automatic feature recalibration
+class AdaptiveInput(Layer):
+    def __init__(self, output_dim):
+        super().__init__()
+        self.attention = Attention()
+        self.dense = Dense(output_dim)
+        
+    def call(self, inputs):
+        attended = self.attention([inputs, inputs])
+        return self.dense(attended)
+
+# Usage in model    
+inputs = Input(shape=input_shape)
+x = AdaptiveInput(128)(inputs)
+x = Bidirectional(GRU(64))(x)
+outputs = Dense(1)(x)
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+[Self-adapting to data characteristics][3][11]
+
+Implementation Strategy
+
+Phase 1: Model Zoo Integration
+
+Add GRU/Transformer implementations alongside LSTM
+
+Implement hybrid architectures (CNN-GRU, LSTM-Transformer)
+
+Add automated model selection wrapper
+
+Phase 2: Hyperparameter Automation
+
+Implement cross-model RandomizedSearchCV
+
+Add Bayesian optimization for critical parameters
+
+Create parameter space configurations for each model type
+
+Phase 3: Performance Optimization
+
+Add mixed precision training
+
+Implement early stopping with dynamic patience
+
+Add model quantization for faster inference
+
+Phase 4: Continuous Learning
+
+Add automated retraining pipeline
+
+Implement concept drift detection
+
+Create model versioning system
+
+Recommended Stack:
+
+- Core Models: CNN-GRU, Transformer, Hybrid Attention Networks
+- Tuning: RandomizedSearchCV + Bayesian Optimization
+- Ensemble: Stacking + Weighted Voting
+- Automation: AutoKeras + Custom Wrappers
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+[Key References: 3][9][15][17]
+[Hyperparameter Tuning Best Practices: 5][14][16]
+
+Citations:
+[1] https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/50697266/4798cd5c-b40b-4694-83d0-1549e517cf83/paste.txt
+[2] https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/50697266/4798cd5c-b40b-4694-83d0-1549e517cf83/paste.txt
+[3] https://www.sciencedirect.com/science/article/pii/S2590291124000615
+[4] https://www.nature.com/articles/s41598-025-88734-6
+[5] https://www.ijert.org/stock-market-price-prediction-using-machine-learning
+[6] https://www.linkedin.com/pulse/tale-hyperparameter-tuning-random-search-cv-grid-swaroop-piduguralla
+[7] https://ijisae.org/index.php/IJISAE/article/download/6274/5074/11397
+[8] https://www.projectpro.io/recipes/find-optimal-parameters-using-randomizedsearchcv-for-regression
+[9] https://dl.acm.org/doi/full/10.1145/3700058.3700075
+[10] https://ijeecs.iaescore.com/index.php/IJEECS/article/download/35633/18407
+[11] https://arxiv.org/html/2402.06689v1
+[12] https://www.bombaysoftwares.com/blog/ai-stock-prediction-software
+[13] https://scikit-learn.org/stable/auto_examples/model_selection/plot_randomized_search.html
+[14] https://arxiv.org/abs/2411.05790
+[15] https://www.kdnuggets.com/hyperparameter-tuning-gridsearchcv-and-randomizedsearchcv-explained
+[16] https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5023739
+[17] https://www.upgrad.com/blog/random-forest-hyperparameter-tuning/
+[18] https://ieomsociety.org/proceedings/2023detroit/37.pdf
+[19] https://www.matellio.com/blog/ai-stock-prediction-software-development/
+[20] https://www.sciencedirect.com/science/article/pii/S1877050918307828
+[21] https://360digitmg.com/blog/comparison-gridsearchcv-and-randomsearchcv
+[22] https://stackoverflow.com/questions/50214310/getting-probabilities-of-best-model-for-randomizedsearchcv
+[23] https://dl.acm.org/doi/fullHtml/10.1145/3674029.3674037
+[24] https://www.nature.com/articles/s41599-025-04761-8
+[25] https://www.sciencedirect.com/science/article/pii/S2468227624003168
+[26] https://www.inciteai.com
+[27] https://primathon.in/ai-hub/ai-solutions/stock-analysis/
+[28] https://dl.acm.org/doi/10.1145/3628454.3631670
+[29] https://blog.alliedoffsets.com/mastering-hyperparameter-tuning-with-gridsearchcv-in-python-a-practical-guide
+[30] https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.RandomizedSearchCV.html
+[31] https://worldscientific.com/doi/10.1142/S146902682350013X
+
+Answer from Perplexity: pplx.ai/share
+
+This is an excellent and ambitious set of suggestions from Perplexity AI! It outlines a very comprehensive approach to building a sophisticated ML service. For a hackathon, implementing all of this would be a monumental task, but we can definitely pick key pieces and integrate them into your existing FastAPI structure.
+
+You want to:
+
+Add more advanced models: Specifically, the suggestion mentions CNN-BiGRU with Attention, GRU, and Transformer models.
+
+Implement RandomizedSearchCV for hyperparameter tuning for these models.
+
+Keep all trained models (LSTM, Polynomial, and the new ones).
+
+Report best hyperparameters found by RandomizedSearchCV.
+
+Include results (predictions, evaluations) of all models in the PDF report.
+
+Let's break down how we can adapt your existing FastAPI service structure to incorporate these. We'll focus on adding one new type of model (e.g., a GRU model as it's a good step up from LSTM and simpler than a full Transformer or the hybrid CNN-BiGRU-Attention initially) and then show how to integrate RandomizedSearchCV.
+
+I. Project Structure Adjustments (Conceptual):
+
+Your fastapi_ml_service/models/ directory will expand:
+
+fastapi_ml_service/
+├── main.py
+├── models/
+│   ├── lstm_model.py
+│   ├── polynomial_model.py
+│   ├── gru_model.py              # <-- NEW: For GRU model
+│   ├── transformer_model.py      # <-- (Optional Future) For Transformer
+│   └── hybrid_cnn_gru_model.py   # <-- (Optional Future) For Hybrid
+├── utils/
+│   ├── data_processing.py
+│   ├── plotting.py
+│   ├── pdf_generator.py
+│   └── hyperparameter_tuner.py   # <-- NEW: For RandomizedSearchCV logic
+├── static/
+│   └── plots/
+│   └── pdfs/
+├── requirements.txt
+└── .env
+
+
+II. Update requirements.txt:
+
+Ensure you have TensorFlow (for Keras), scikit-learn, pandas, numpy, etc. scipy is needed for loguniform if you use it in RandomizedSearchCV.
+
+fastapi
+uvicorn[standard]
+pandas
+numpy
+scikit-learn
+tensorflow
+matplotlib
+python-multipart
+fpdf2
+google-generativeai
+python-dotenv
+scipy # Add for loguniform and other distributions
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+Run pip install -r requirements.txt after updating.
+
+III. Create models/gru_model.py:
+
+This will be similar to your lstm_model.py but using GRU layers.
+
+# models/gru_model.py
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import GRU, Dropout, Dense
+from tensorflow.keras.optimizers import Adam # For custom learning rate
+from datetime import timedelta
+from typing import Tuple
+
+# Helper from lstm_model.py (can be moved to a common utils if used by multiple models)
+def create_sequences(data_scaled, sequence_length):
+    x, y = [], []
+    for i in range(sequence_length, len(data_scaled)):
+        x.append(data_scaled[i-sequence_length:i, 0])
+        y.append(data_scaled[i, 0])
+    return np.array(x), np.array(y)
+
+def build_gru_model_for_search(input_shape, units=128, dropout_rate=0.2, learning_rate=0.001, activation='relu'):
+    """
+    Builds a GRU model. This function is designed to be compatible with
+    KerasRegressor for RandomizedSearchCV.
+    input_shape will be (sequence_length, 1)
+    """
+    model = Sequential([
+        GRU(units=units, return_sequences=True, input_shape=input_shape, activation=activation, recurrent_dropout=dropout_rate), # recurrent_dropout in GRU
+        Dropout(dropout_rate),
+        GRU(units=int(units/2), return_sequences=False, activation=activation, recurrent_dropout=dropout_rate), # Second GRU layer
+        Dropout(dropout_rate),
+        Dense(units=1)
+    ])
+    optimizer = Adam(learning_rate=learning_rate)
+    model.compile(optimizer=optimizer, loss='mean_squared_error') # or 'huber_loss'
+    return model
+
+def train_gru_model_with_params(
+    train_df: pd.DataFrame, 
+    scaler: MinMaxScaler, 
+    sequence_length: int, 
+    model_params: dict, # Best params from RandomizedSearch
+    epochs: int = 50, # Default epochs for final training
+    batch_size: int = 32
+) -> Tuple[Sequential, any]: # Model and history
+
+    scaled_train_close = scaler.transform(train_df[['Close']])
+    x_train, y_train = create_sequences(scaled_train_close, sequence_length)
+    x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+
+    # Build model with the best parameters found
+    gru_model = build_gru_model_for_search(
+        input_shape=(x_train.shape[1], 1),
+        units=model_params.get('units', 128),
+        dropout_rate=model_params.get('dropout_rate', 0.2),
+        learning_rate=model_params.get('learning_rate', 0.001),
+        activation=model_params.get('activation', 'relu')
+    )
+    
+    print(f"Training final GRU model with params: {model_params}, epochs: {epochs}")
+    history = gru_model.fit(x_train, y_train, epochs=epochs, batch_size=batch_size, verbose=1)
+    return gru_model, history
+
+
+def evaluate_gru_model(
+    model: Sequential, 
+    test_df: pd.DataFrame, 
+    train_df_for_sequence: pd.DataFrame, # Last part of training data for initial sequence
+    scaler: MinMaxScaler, 
+    sequence_length: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]: # y_actual, y_pred, x_test
+
+    last_sequence_from_train_scaled = scaler.transform(train_df_for_sequence[['Close']])[-sequence_length:]
+    test_close_scaled = scaler.transform(test_df[['Close']])
+    
+    combined_input_scaled = np.concatenate((last_sequence_from_train_scaled, test_close_scaled), axis=0)
+    
+    x_test, y_test_actual_scaled = create_sequences(combined_input_scaled, sequence_length)
+    x_test_reshaped = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
+
+    y_pred_test_scaled = model.predict(x_test_reshaped)
+    
+    y_pred_test_rescaled = scaler.inverse_transform(y_pred_test_scaled)
+    y_test_actual_rescaled = scaler.inverse_transform(y_test_actual_scaled.reshape(-1,1))
+    
+    return y_test_actual_rescaled, y_pred_test_rescaled, x_test_reshaped
+
+
+def predict_gru_future(
+    model: Sequential, 
+    full_df: pd.DataFrame, 
+    scaler: MinMaxScaler, 
+    sequence_length: int, 
+    n_future_days: int
+) -> Tuple[np.ndarray, pd.DatetimeIndex]:
+
+    last_sequence_scaled = scaler.transform(full_df[['Close']])[-sequence_length:]
+    current_sequence_for_model = last_sequence_scaled.reshape(1, sequence_length, 1)
+
+    future_predictions_scaled = []
+    for _ in range(n_future_days):
+        next_pred_scaled = model.predict(current_sequence_for_model, verbose=0) # verbose=0 for less log spam
+        future_predictions_scaled.append(next_pred_scaled[0, 0])
+        
+        new_sequence_part = np.append(current_sequence_for_model[0, 1:, 0], next_pred_scaled[0,0])
+        current_sequence_for_model = new_sequence_part.reshape(1, sequence_length, 1)
+
+    future_predictions_rescaled = scaler.inverse_transform(np.array(future_predictions_scaled).reshape(-1, 1))
+    
+    last_date = full_df['Date'].iloc[-1]
+    future_dates = pd.to_datetime([last_date + timedelta(days=i) for i in range(1, n_future_days + 1)])
+    
+    return future_predictions_rescaled, future_dates
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+IV. Create utils/hyperparameter_tuner.py:
+
+This file will contain the RandomizedSearchCV logic.
+
+# utils/hyperparameter_tuner.py
+from sklearn.model_selection import RandomizedSearchCV
+from tensorflow.keras.wrappers.scikit_learn import KerasRegressor # Deprecated in TF 2.10+, use scikeras.wrappers.KerasRegressor
+# If using TF 2.10+ and scikeras is installed:
+# from scikeras.wrappers import KerasRegressor 
+import numpy as np
+from scipy.stats import randint as sp_randint
+from scipy.stats import uniform, loguniform
+
+# Import your model building functions
+from models.lstm_model import build_lstm_model_for_search # Assuming you create this
+from models.gru_model import build_gru_model_for_search
+
+# Define parameter spaces
+LSTM_PARAM_SPACE = {
+    'units': sp_randint(32, 128), # Integer range
+    'dropout_rate': uniform(0.1, 0.4), # Continuous uniform distribution (0.1 to 0.1+0.4=0.5)
+    'learning_rate': loguniform(1e-4, 1e-2),
+    # 'batch_size': [16, 32, 64], # KerasRegressor can take batch_size and epochs
+    # 'epochs': [10, 20]       # These are fit_params for RandomizedSearchCV
+}
+
+GRU_PARAM_SPACE = {
+    'units': sp_randint(32, 128),
+    'dropout_rate': uniform(0.1, 0.4), # for GRU, this might be recurrent_dropout or just dropout
+    'learning_rate': loguniform(1e-4, 1e-2),
+    'activation': ['relu', 'tanh']
+    # 'batch_size': [16, 32, 64],
+    # 'epochs': [10, 20]
+}
+
+# Add more for other models if needed (Transformer, Hybrid)
+
+MODEL_CONFIGS = {
+    "lstm": {
+        "build_fn": build_lstm_model_for_search,
+        "param_space": LSTM_PARAM_SPACE,
+        "fit_params": {'epochs': 10, 'batch_size': 32, 'verbose': 0} # epochs for RandomizedSearch CV folds
+    },
+    "gru": {
+        "build_fn": build_gru_model_for_search,
+        "param_space": GRU_PARAM_SPACE,
+        "fit_params": {'epochs': 10, 'batch_size': 32, 'verbose': 0}
+    }
+    # Add "transformer", "hybrid_cnn_gru" here later
+}
+
+def tune_model_hyperparameters(
+    model_type: str, 
+    x_train_shaped: np.ndarray, # Shape: (samples, sequence_length, features=1)
+    y_train_scaled: np.ndarray, # Shape: (samples,)
+    n_iter: int = 10, # Number of parameter settings that are sampled
+    cv: int = 3       # Number of cross-validation folds
+) -> dict: # Returns best_params
+
+    if model_type not in MODEL_CONFIGS:
+        raise ValueError(f"Unsupported model type for tuning: {model_type}")
+
+    config = MODEL_CONFIGS[model_type]
+    
+    # Create KerasRegressor wrapper
+    # Note: input_shape needs to be passed to build_fn.
+    # KerasRegressor doesn't directly pass dynamic args like input_shape from fit() to build_fn.
+    # We pass it via a fixed parameter in the KerasRegressor constructor.
+    # Or, ensure build_fn can infer it or doesn't strictly need it if using input_dim in first layer.
+    # For sequence models, input_shape is critical.
+    
+    # Solution: KerasRegressor takes build_fn args as kwargs
+    regressor = KerasRegressor(
+        build_fn=config["build_fn"], 
+        input_shape=(x_train_shaped.shape[1], x_train_shaped.shape[2]) # Pass input_shape here
+    )
+
+    random_search = RandomizedSearchCV(
+        estimator=regressor,
+        param_distributions=config["param_space"],
+        n_iter=n_iter,
+        cv=cv,
+        scoring='neg_mean_squared_error', # Lower MSE is better, so neg_mse (higher is better)
+        verbose=1, # Set to 0 or 1 for less/more output
+        n_jobs=-1, # Use all available cores, careful on shared systems
+        random_state=42 # For reproducibility
+    )
+
+    print(f"Starting RandomizedSearchCV for {model_type}...")
+    random_search.fit(x_train_shaped, y_train_scaled, **config["fit_params"])
+    
+    print(f"Best parameters found for {model_type}: {random_search.best_params_}")
+    print(f"Best score for {model_type}: {random_search.best_score_}")
+    
+    # The best_params_ might include batch_size/epochs if they were in param_space.
+    # We are primarily interested in the model architecture params (units, dropout, lr).
+    best_model_params = {k: v for k, v in random_search.best_params_.items() 
+                         if k not in ['batch_size', 'epochs']} # Filter out fit params if they were in search space
+    
+    return best_model_params
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+Note on KerasRegressor:
+
+The tensorflow.keras.wrappers.scikit_learn.KerasRegressor is deprecated in newer TensorFlow versions (TF 2.10+).
+
+The recommended replacement is scikeras.wrappers.KerasRegressor from the scikeras library (pip install scikeras).
+
+If you are on an older TF, the current wrapper might work. If on newer, you'll need to switch to scikeras. The API is slightly different. For now, I've kept the TF one with a comment.
+
+Passing input_shape to build_fn through KerasRegressor is done by adding input_shape as a parameter to KerasRegressor itself, which then passes it to your build_fn.
+
+V. Modify models/lstm_model.py to have build_lstm_model_for_search:
+
+You'll need a builder function similar to the GRU one, designed for KerasRegressor.
+
+# models/lstm_model.py
+# ... (imports, create_lstm_sequences) ...
+
+def build_lstm_model_for_search(input_shape, units=50, dropout_rate=0.2, learning_rate=0.001, activation='relu'):
+    """
+    Builds an LSTM model, compatible with KerasRegressor for hyperparameter search.
+    """
+    model = Sequential([
+        LSTM(units=units, return_sequences=True, input_shape=input_shape, activation=activation),
+        Dropout(dropout_rate),
+        LSTM(units=int(units*1.2), return_sequences=True, activation=activation), # Example: slightly more units
+        Dropout(dropout_rate + 0.1 if dropout_rate + 0.1 <= 0.5 else 0.5),
+        LSTM(units=int(units*1.5), return_sequences=True, activation=activation),
+        Dropout(dropout_rate + 0.2 if dropout_rate + 0.2 <= 0.5 else 0.5),
+        LSTM(units=int(units*2) if int(units*2) <=240 else 240 , activation=activation), # Cap max units
+        Dropout(dropout_rate + 0.2 if dropout_rate + 0.2 <= 0.5 else 0.5),
+        Dense(units=1)
+    ])
+    optimizer = Adam(learning_rate=learning_rate)
+    model.compile(optimizer=optimizer, loss='mean_squared_error')
+    return model
+
+def train_lstm_model_with_params(
+    train_df: pd.DataFrame, 
+    scaler: MinMaxScaler, 
+    sequence_length: int, 
+    model_params: dict, # Best params from RandomizedSearch
+    epochs: int = 50, 
+    batch_size: int = 32
+) -> Tuple[Sequential, any]:
+
+    scaled_train_close = scaler.transform(train_df[['Close']])
+    x_train, y_train = create_lstm_sequences(scaled_train_close, sequence_length)
+    x_train_shaped = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+
+    lstm_model = build_lstm_model_for_search(
+        input_shape=(x_train_shaped.shape[1], 1),
+        units=model_params.get('units', 50),
+        dropout_rate=model_params.get('dropout_rate', 0.2),
+        learning_rate=model_params.get('learning_rate', 0.001),
+        activation=model_params.get('activation','relu') # if you add activation to LSTM search space
+    )
+    
+    print(f"Training final LSTM model with params: {model_params}, epochs: {epochs}")
+    history = lstm_model.fit(x_train_shaped, y_train, epochs=epochs, batch_size=batch_size, verbose=1)
+    return lstm_model, history
+
+# ... (evaluate_lstm_model, predict_lstm_future remain mostly the same, ensure they take the trained model)
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+VI. Modify main.py to integrate tuning and new models:
+
+This is a significant update to main.py.
+
+# ./main.py
+import os
+import shutil
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+import pandas as pd
+import numpy as np # For reshaping for tuner
+import uuid
+from datetime import datetime, timedelta
+import io
+import json
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from sklearn.metrics import mean_absolute_error, r2_score
+
+# Data processing
+from utils.data_processing import preprocess_data, create_sequences_for_tuner # Add create_sequences_for_tuner
+from utils.plotting import plot_test_predictions, plot_future_predictions, plot_polynomial_regression
+from utils.pdf_generator import generate_prediction_report, PDF_DIR
+from utils.gemini_analyzer import generate_analysis_prompt, get_gemini_analysis
+from utils.hyperparameter_tuner import tune_model_hyperparameters # NEW IMPORT
+
+# Model functions
+from models.lstm_model import (
+    train_lstm_model_with_params, # UPDATED
+    evaluate_lstm_model,
+    predict_lstm_future
+)
+from models.polynomial_model import (
+    train_polynomial_model,
+    predict_polynomial_future,
+    evaluate_polynomial_model
+)
+from models.gru_model import ( # NEW IMPORTS
+    train_gru_model_with_params,
+    evaluate_gru_model,
+    predict_gru_future
+)
+
+
+# Configuration
+SEQUENCE_LENGTH = 60 # Adjusted
+N_FUTURE_DAYS_PREDICTION = 30
+FINAL_TRAIN_EPOCHS = 50 # Epochs for final model training AFTER tuning
+POLYNOMIAL_DEGREE = 3
+BUY_SELL_THRESHOLD_PERCENT = 0.5
+RANDOM_SEARCH_N_ITER = 5 # Number of iterations for RandomizedSearchCV (keep low for hackathon speed)
+RANDOM_SEARCH_CV = 2     # Number of CV folds (keep low for speed)
+
+
+STATIC_DIR = "static"
+PLOTS_DIR = os.path.join(STATIC_DIR, "plots")
+os.makedirs(PLOTS_DIR, exist_ok=True)
+os.makedirs(PDF_DIR, exist_ok=True)
+
+app = FastAPI(title="Advanced Stock Prediction ML Service")
+
+def cleanup_old_files(directory, max_age_minutes=60):
+    # ... (same as before) ...
+    now = datetime.now()
+    for filename in os.listdir(directory):
+        file_path = os.path.join(directory, filename)
+        try:
+            if os.path.isfile(file_path):
+                file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+                if (now - file_mod_time) > timedelta(minutes=max_age_minutes):
+                    os.remove(file_path)
+        except Exception:
+            pass # Ignore cleanup errors
+
+class ModelResultDetail(BaseModel):
+    best_params: dict = {}
+    test_metrics: dict = {}
+    future_predictions: dict = {}
+    training_loss: list = [] # For deep learning models
+
+class TrainResponse(BaseModel):
+    message: str
+    run_id: str
+    stock_symbol: str # Added for clarity in response
+    lstm_results: ModelResultDetail
+    gru_results: ModelResultDetail # NEW
+    polynomial_results: ModelResultDetail # Keep ModelResultDetail structure for consistency
+    trading_suggestion_tomorrow: dict # Based on one model, e.g., LSTM or an ensemble
+    ai_qualitative_analysis: dict | str
+    plot_urls: dict
+    pdf_report_url: str
+
+
+@app.post("/train-predict/", response_model=TrainResponse)
+async def train_and_predict_models(
+    background_tasks: BackgroundTasks,
+    csv_file: UploadFile = File(...)
+):
+    run_id = str(uuid.uuid4())
+    stock_symbol_from_csv = "UNKNOWN" # Default
+
+    results_payload = {
+        "message": "Processing started.",
+        "run_id": run_id,
+        "stock_symbol": stock_symbol_from_csv,
+        "csv_filename": csv_file.filename,
+        "lstm_results": {"best_params": {}, "test_metrics": {}, "future_predictions": {}, "training_loss": []},
+        "gru_results": {"best_params": {}, "test_metrics": {}, "future_predictions": {}, "training_loss": []}, # NEW
+        "polynomial_results": {"test_metrics": {}, "future_predictions": {}}, # Poly doesn't have 'best_params' from RandomizedSearch in this setup
+        "trading_suggestion_tomorrow": {},
+        "ai_qualitative_analysis": {},
+        "plot_urls": {},
+        "pdf_report_url": ""
+    }
+
+    try:
+        contents = await csv_file.read()
+        df_full = pd.read_csv(io.StringIO(contents.decode('utf-8')))
+
+        if 'Date' not in df_full.columns or 'Close' not in df_full.columns:
+            raise HTTPException(status_code=400, detail="CSV must contain 'Date' and 'Close' columns.")
+        if 'Symbol' in df_full.columns and not df_full['Symbol'].empty:
+            stock_symbol_from_csv = df_full['Symbol'].iloc[0]
+            results_payload["stock_symbol"] = stock_symbol_from_csv
+
+
+        df_full['Date'] = pd.to_datetime(df_full['Date'])
+        df_full.sort_values(by='Date', inplace=True)
+        df_full.reset_index(drop=True, inplace=True)
+        df_full['Close'] = pd.to_numeric(df_full['Close'], errors='coerce')
+        df_full.dropna(subset=['Close'], inplace=True)
+
+        if len(df_full) < SEQUENCE_LENGTH + N_FUTURE_DAYS_PREDICTION + 20: # Min data check
+             raise HTTPException(status_code=400, detail=f"Not enough data. Need at least {SEQUENCE_LENGTH + N_FUTURE_DAYS_PREDICTION + 20} rows.")
+
+        original_min_date = df_full['Date'].min()
+        last_actual_close_price = df_full['Close'].iloc[-1]
+        last_actual_date = df_full['Date'].iloc[-1]
+
+        train_df, test_df, price_scaler = preprocess_data(df_full.copy(), sequence_length=SEQUENCE_LENGTH)
+        
+        # Data for hyperparameter tuner (needs to be reshaped for KerasRegressor)
+        # This data should be SCALED.
+        x_train_for_tuner_scaled, y_train_for_tuner_scaled = create_sequences_for_tuner(
+            price_scaler.transform(train_df[['Close']]), SEQUENCE_LENGTH
+        )
+        x_train_for_tuner_reshaped = np.reshape(
+            x_train_for_tuner_scaled, 
+            (x_train_for_tuner_scaled.shape[0], x_train_for_tuner_scaled.shape[1], 1)
+        )
+
+        # --- LSTM Model with Hyperparameter Tuning ---
+        print(f"[{run_id}] Tuning LSTM hyperparameters...")
+        best_lstm_params = tune_model_hyperparameters(
+            "lstm", x_train_for_tuner_reshaped, y_train_for_tuner_scaled,
+            n_iter=RANDOM_SEARCH_N_ITER, cv=RANDOM_SEARCH_CV
+        )
+        results_payload["lstm_results"]["best_params"] = best_lstm_params
+        
+        print(f"[{run_id}] Training final LSTM model with best params: {best_lstm_params}...")
+        lstm_model, lstm_history = train_lstm_model_with_params(
+            train_df, price_scaler, SEQUENCE_LENGTH, best_lstm_params, epochs=FINAL_TRAIN_EPOCHS
+        )
+        results_payload["lstm_results"]["training_loss"] = lstm_history.history.get('loss', [0.0]) # Ensure it's a list
+
+        y_test_actual_lstm, y_pred_test_lstm, _ = evaluate_lstm_model(lstm_model, test_df, train_df, price_scaler, SEQUENCE_LENGTH)
+        results_payload["lstm_results"]["test_metrics"] = {"mae": float(mean_absolute_error(y_test_actual_lstm, y_pred_test_lstm)), "r2_score": float(r2_score(y_test_actual_lstm, y_pred_test_lstm))}
+        
+        future_preds_lstm, future_dates_lstm = predict_lstm_future(lstm_model, df_full, price_scaler, SEQUENCE_LENGTH, N_FUTURE_DAYS_PREDICTION)
+        results_payload["lstm_results"]["future_predictions"] = {dt.strftime('%Y-%m-%d'): float(pred) for dt, pred in zip(future_dates_lstm, future_preds_lstm.flatten())}
+
+        # LSTM Plotting (same as before, ensure plot_urls is populated in results_payload)
+        # ...
+
+        # --- GRU Model with Hyperparameter Tuning ---
+        print(f"[{run_id}] Tuning GRU hyperparameters...")
+        best_gru_params = tune_model_hyperparameters(
+            "gru", x_train_for_tuner_reshaped, y_train_for_tuner_scaled,
+            n_iter=RANDOM_SEARCH_N_ITER, cv=RANDOM_SEARCH_CV
+        )
+        results_payload["gru_results"]["best_params"] = best_gru_params
+
+        print(f"[{run_id}] Training final GRU model with best params: {best_gru_params}...")
+        gru_model, gru_history = train_gru_model_with_params(
+            train_df, price_scaler, SEQUENCE_LENGTH, best_gru_params, epochs=FINAL_TRAIN_EPOCHS
+        )
+        results_payload["gru_results"]["training_loss"] = gru_history.history.get('loss', [0.0])
+
+        y_test_actual_gru, y_pred_test_gru, _ = evaluate_gru_model(gru_model, test_df, train_df, price_scaler, SEQUENCE_LENGTH)
+        results_payload["gru_results"]["test_metrics"] = {"mae": float(mean_absolute_error(y_test_actual_gru, y_pred_test_gru)), "r2_score": float(r2_score(y_test_actual_gru, y_pred_test_gru))}
+
+        future_preds_gru, future_dates_gru = predict_gru_future(gru_model, df_full, price_scaler, SEQUENCE_LENGTH, N_FUTURE_DAYS_PREDICTION)
+        results_payload["gru_results"]["future_predictions"] = {dt.strftime('%Y-%m-%d'): float(pred) for dt, pred in zip(future_dates_gru, future_preds_gru.flatten())}
+
+        # GRU Plotting (create new plot functions or adapt existing ones for GRU)
+        gru_plot_test_filename = f"{run_id}_gru_test_predictions.png"
+        gru_plot_test_path = os.path.join(PLOTS_DIR, gru_plot_test_filename)
+        plot_test_predictions(test_df['Date'], y_test_actual_gru, y_pred_test_gru, "GRU: Test Set Predictions", gru_plot_test_path)
+        results_payload["plot_urls"]["gru_test_plot"] = f"/static/plots/{gru_plot_test_filename}"
+
+        gru_plot_future_filename = f"{run_id}_gru_future_predictions.png"
+        gru_plot_future_path = os.path.join(PLOTS_DIR, gru_plot_future_filename)
+        plot_future_predictions(df_full['Date'], df_full['Close'], test_df['Date'], y_pred_test_gru, future_dates_gru, future_preds_gru, "GRU: Historical, Test & Future Predictions", gru_plot_future_path)
+        results_payload["plot_urls"]["gru_future_plot"] = f"/static/plots/{gru_plot_future_filename}"
+
+
+        # --- Polynomial Regression Model (No hyperparameter tuning in this example, but could be added) ---
+        print(f"[{run_id}] Training Polynomial Regression model...")
+        poly_model, poly_y_scaler, _, _ = train_polynomial_model(train_df.copy(), degree=POLYNOMIAL_DEGREE)
+        
+        y_test_actual_poly, y_pred_test_poly = evaluate_polynomial_model(poly_model, test_df.copy(), poly_y_scaler, original_min_date, degree=POLYNOMIAL_DEGREE)
+        results_payload["polynomial_results"]["test_metrics"] = {"mae": float(mean_absolute_error(y_test_actual_poly, y_pred_test_poly)), "r2_score": float(r2_score(y_test_actual_poly, y_pred_test_poly))}
+        
+        future_preds_poly, future_dates_poly = predict_polynomial_future(poly_model, df_full, original_min_date, poly_y_scaler, POLYNOMIAL_DEGREE, N_FUTURE_DAYS_PREDICTION)
+        results_payload["polynomial_results"]["future_predictions"] = {dt.strftime('%Y-%m-%d'): float(pred) for dt, pred in zip(future_dates_poly, future_preds_poly.flatten())}
+
+        # Polynomial Plotting (same as before)
+        # ...
+
+        # --- Trading Suggestion (Decide which model to base this on, or an ensemble) ---
+        # For now, let's keep it based on LSTM as an example
+        if len(future_preds_lstm) > 0:
+            # ... (your existing trading suggestion logic based on LSTM) ...
+            predicted_tomorrow_price = future_preds_lstm.flatten()[0] # Using LSTM
+            price_diff_percent = ((predicted_tomorrow_price - last_actual_close_price) / last_actual_close_price) * 100
+            signal = "HOLD/NEUTRAL"
+            # ... (rest of your logic)
+            results_payload["trading_suggestion_tomorrow"] = {
+                "signal": signal, "predicted_price_lstm": float(predicted_tomorrow_price), # Clarify source
+                "last_actual_price": float(last_actual_close_price), "percentage_change": float(price_diff_percent),
+                # ...
+            }
+        else:
+            results_payload["trading_suggestion_tomorrow"] = {"signal": "N/A", "reason": "Not enough future predictions from primary model."}
+
+
+        # --- Generate AI Analysis with Gemini (Pass new model results) ---
+        print(f"[{run_id}] Generating AI analysis with Gemini...")
+        gemini_prompt = generate_analysis_prompt(
+            stock_symbol=results_payload["stock_symbol"],
+            historical_data_df=df_full.tail(SEQUENCE_LENGTH + 10),
+            lstm_test_actual=y_test_actual_lstm, lstm_test_pred=y_pred_test_lstm, lstm_test_dates=test_df['Date'],
+            lstm_future_pred=future_preds_lstm, lstm_future_dates=future_dates_lstm,
+            gru_test_actual=y_test_actual_gru, gru_test_pred=y_pred_test_gru, gru_test_dates=test_df['Date'], # NEW
+            gru_future_pred=future_preds_gru, gru_future_dates=future_dates_gru, # NEW
+            poly_test_actual=y_test_actual_poly, poly_test_pred=y_pred_test_poly, poly_test_dates=test_df['Date'],
+            poly_future_pred=future_preds_poly, poly_future_dates=future_dates_poly,
+            trading_suggestion=results_payload["trading_suggestion_tomorrow"],
+            lstm_best_params=best_lstm_params, # NEW
+            gru_best_params=best_gru_params    # NEW
+        )
+        
+        ai_analysis_json_str = await get_gemini_analysis(gemini_prompt) # get_gemini_analysis should return string now
+        try:
+            ai_analysis_dict = json.loads(ai_analysis_json_str)
+            # ... (your date and price formatting for ai_analysis_dict) ...
+            results_payload["ai_qualitative_analysis"] = ai_analysis_dict
+        except json.JSONDecodeError:
+            results_payload["ai_qualitative_analysis"] = {"error": "Failed to parse AI analysis as JSON", "raw_response": ai_analysis_json_str}
+        
+        print(f"[{run_id}] AI analysis generated.")
+
+        # --- Generate PDF Report (Update to include GRU results) ---
+        print(f"[{run_id}] Generating PDF report...")
+        pdf_file_path = generate_prediction_report(run_id, results_payload, results_payload["plot_urls"])
+        pdf_filename_only = os.path.basename(pdf_file_path)
+        results_payload["pdf_report_url"] = f"/reports/{pdf_filename_only}"
+        print(f"[{run_id}] PDF report generated: {pdf_file_path}")
+
+        results_payload["message"] = "Processing complete."
+        background_tasks.add_task(cleanup_old_files, PLOTS_DIR)
+        background_tasks.add_task(cleanup_old_files, PDF_DIR)
+        
+        return results_payload
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[{run_id}] Error during processing: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+# ... (StaticFiles mount, /reports/{pdf_filename} GET endpoint, and root GET endpoint remain the same) ...
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+VII. Modify utils/data_processing.py for create_sequences_for_tuner:
+
+The RandomizedSearchCV with KerasRegressor expects y_train to be a 1D array (samples,), not (samples, 1).
+
+# utils/data_processing.py
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np # Add numpy import
+
+def preprocess_data(df, sequence_length, train_split_ratio=0.8):
+    # ... (same as before)
+    train_size = int(len(df) * train_split_ratio)
+    train_df = df.iloc[:train_size].copy()
+    test_df = df.iloc[train_size:].copy().reset_index(drop=True)
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaler.fit(train_df[['Close']])
+    return train_df, test_df, scaler
+
+def create_sequences_for_tuner(data_scaled_1d_array, sequence_length):
+    """
+    Creates sequences for Keras models, where y is 1D.
+    data_scaled_1d_array should be the scaled 'Close' price as a 1D numpy array.
+    """
+    x, y = [], []
+    # Ensure data_scaled_1d_array is 1D
+    if data_scaled_1d_array.ndim > 1:
+        data_scaled_1d_array = data_scaled_1d_array.flatten()
+
+    for i in range(sequence_length, len(data_scaled_1d_array)):
+        x.append(data_scaled_1d_array[i-sequence_length:i]) # Input sequence
+        y.append(data_scaled_1d_array[i])                  # Single next value
+    return np.array(x), np.array(y)
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+VIII. Update utils/gemini_analyzer.py (the generate_analysis_prompt function):
+
+Add GRU results and best params to the prompt.
+
+# utils/gemini_analyzer.py
+# ... (imports) ...
+
+def generate_analysis_prompt(
+    stock_symbol: str,
+    historical_data_df: pd.DataFrame,
+    lstm_test_actual, lstm_test_pred, lstm_test_dates,
+    lstm_future_pred, lstm_future_dates,
+    gru_test_actual, gru_test_pred, gru_test_dates, # NEW
+    gru_future_pred, gru_future_dates,             # NEW
+    poly_test_actual, poly_test_pred, poly_test_dates,
+    poly_future_pred, poly_future_dates,
+    trading_suggestion: dict,
+    lstm_best_params: dict, # NEW
+    gru_best_params: dict   # NEW
+):
+    # ... (historical_snippet and formatting functions same as before) ...
+    historical_snippet = "Recent Historical Closing Prices (last few days):\nDate       | Close\n"
+    for idx, row in historical_data_df.tail(min(len(historical_data_df), 5)).iterrows():
+        historical_snippet += f"{row['Date'].strftime('%Y-%m-%d'):<10} | {row['Close']:.2f}\n"
+
+    lstm_test_snippet = format_predictions_for_prompt("LSTM Test Set (sample)", lstm_test_dates, lstm_test_pred, lstm_test_actual)
+    lstm_future_snippet = format_predictions_for_prompt("LSTM Future Predictions (sample)", lstm_future_dates, lstm_future_pred)
+    
+    gru_test_snippet = format_predictions_for_prompt("GRU Test Set (sample)", gru_test_dates, gru_test_pred, gru_test_actual) # NEW
+    gru_future_snippet = format_predictions_for_prompt("GRU Future Predictions (sample)", gru_future_dates, gru_future_pred) # NEW
+
+    poly_test_snippet = format_predictions_for_prompt("Poly Reg Test Set (sample)", poly_test_dates, poly_test_pred, poly_test_actual)
+    poly_future_snippet = format_predictions_for_prompt("Poly Reg Future Predictions (sample)", poly_future_dates, poly_future_pred)
+
+    prompt = f"""
+**SYSTEM PROMPT: AI Stock Prediction Analysis & Sentiment Report Generator (JSON Output)**
+(Your existing prompt intro)
+
+**Input Data Summary for Stock: {stock_symbol}**
+{historical_snippet}
+
+**LSTM Model (Best Params: {json.dumps(lstm_best_params)})**
+{lstm_test_snippet}
+{lstm_future_snippet}
+
+**GRU Model (Best Params: {json.dumps(gru_best_params)})**
+{gru_test_snippet}
+{gru_future_snippet}
+
+**Polynomial Regression Model**
+{poly_test_snippet}
+{poly_future_snippet}
+
+Trading Suggestion for Tomorrow (from LSTM prediction vs. last close):
+Signal: {trading_suggestion.get('signal', 'N/A')}
+Reason: {trading_suggestion.get('reason', 'N/A')}
+
+**Your Task: Generate a JSON Object with Analysis and Sentiment**
+(Your existing JSON structure, but now ensure it has sections for GRU model analysis)
+
+**JSON Output Structure:**
+```json
+{{
+  "stockSymbol": "{stock_symbol}",
+  "analysisDate": "YYYY-MM-DD (Today's Date)",
+  // ... (other top-level fields) ...
+  "lstmModelAnalysis": {{ ... }},
+  "gruModelAnalysis": {{  // NEW SECTION
+    "bestParamsFound": {json.dumps(gru_best_params)},
+    "performanceOnTest": "Qualitative assessment for GRU.",
+    "futureOutlook": "Qualitative assessment of GRU's future predictions.",
+    "confidenceInOutlook": "Low/Medium/High for GRU."
+  }},
+  "polynomialRegressionAnalysis": {{ ... }},
+  "combinedOutlook": {{
+    "shortTermForecastSynopsis": "Synthesize insights from LSTM, GRU, and Polynomial models...",
+    // ...
+  }},
+  // ... (rest of your JSON structure)
+}}
+"""
+    return prompt.strip()
+
+# ... (get_gemini_analysis function remains the same, ensure it returns a string that main.py then parses)
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+IX. Update utils/pdf_generator.py (generate_prediction_report function):
+
+You'll need to add sections to display GRU model results (best params, metrics, future predictions table) similar to how LSTM results are displayed.
+
+# utils/pdf_generator.py
+# ... (class PDFReport and its methods) ...
+
+def generate_prediction_report(run_id: str, report_data: dict, plot_paths: dict):
+    pdf_filename = f"{run_id}_report.pdf"
+    pdf_filepath = os.path.join(PDF_DIR, pdf_filename)
+    pdf = PDFReport()
+    pdf.alias_nb_pages()
+    pdf.add_page()
+
+    # ... (Disclaimer, Run Info, Trading Suggestion, AI Qualitative Analysis - update AI analysis to show GRU section if Gemini includes it) ...
+    
+    # Example for AI Analysis section update (conceptual, depends on your Gemini output structure)
+    ai_analysis = report_data.get("ai_qualitative_analysis")
+    if isinstance(ai_analysis, dict):
+        # ... (render LSTM and Poly sections) ...
+        gru_ai_analysis = ai_analysis.get("gruModelAnalysis", {})
+        if gru_ai_analysis:
+            pdf.set_font('Arial', 'BU', 10); pdf.cell(0, 6, "GRU Model Insights (from AI):", 0, 1)
+            if gru_ai_analysis.get("bestParamsFound"): pdf.chapter_body(f"Best Tuned Params: {json.dumps(gru_ai_analysis['bestParamsFound'])}")
+            pdf.chapter_body(f"Test Performance: {gru_ai_analysis.get('performanceOnTest', 'N/A')}")
+            # ... (other GRU AI insights)
+
+    # LSTM Numerical Results (as before)
+    # ...
+
+    # GRU Numerical Results (NEW)
+    if "gru_results" in report_data:
+        pdf.chapter_title("GRU Model - Numerical Summary")
+        gru_data = report_data["gru_results"]
+        if gru_data.get("best_params"):
+             pdf.chapter_body(f"Best Hyperparameters Found: {json.dumps(gru_data['best_params'])}")
+        
+        gru_metrics = gru_data.get("test_metrics", {})
+        pdf.add_metric("GRU", "Test MAE", f"{gru_metrics.get('mae', 'N/A'):.4f}" if isinstance(gru_metrics.get('mae'), (int,float)) else 'N/A')
+        pdf.add_metric("GRU", "Test R2 Score", f"{gru_metrics.get('r2_score', 'N/A'):.4f}" if isinstance(gru_metrics.get('r2_score'), (int,float)) else 'N/A')
+        pdf.ln(2)
+        
+        future_preds_gru = gru_data.get("future_predictions", {})
+        if future_preds_gru:
+            pdf.set_font('Arial', 'B', 10); pdf.cell(0, 6, "GRU Future Predictions (Table):", 0, 1, 'L')
+            headers = ["Date", "Predicted Price (GRU)"]
+            table_data = [[date, f"{price:.2f}" if isinstance(price, (int,float)) else 'N/A'] for date, price in future_preds_gru.items()]
+            pdf.add_table(headers, table_data, col_widths=[pdf.w * 0.25, pdf.w * 0.25])
+        pdf.ln(3)
+
+    # Polynomial Regression Numerical Results (as before)
+    # ...
+
+    # Raw JSON Data Summary (add GRU parts)
+    summary_data_for_json_dump = {
+        # ... (existing fields) ...
+        "gru_best_params": report_data.get("gru_results", {}).get("best_params"),
+        "gru_metrics": report_data.get("gru_results", {}).get("test_metrics"),
+        "gru_future_predictions_sample": dict(list(report_data.get("gru_results", {}).get("future_predictions", {}).items())[:5]),
+    }
+    # ... (pdf.add_json_dump) ...
+
+    # Visualizations (add GRU plots)
+    if plot_paths:
+        # ... (LSTM and Poly plot calls) ...
+        if plot_paths.get("gru_test_plot"):
+            pdf.add_plot_image(plot_paths["gru_test_plot"].replace("/static/", "static/"), "GRU: Test Set Predictions")
+        if plot_paths.get("gru_future_plot"):
+            pdf.add_plot_image(plot_paths["gru_future_plot"].replace("/static/", "static/"), "GRU: Historical, Test & Future Predictions")
+    
+    pdf.output(pdf_filepath, 'F')
+    return pdf_filepath
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+Important Considerations:
+
+Complexity & Time: Adding each new model type, its hyperparameter tuning setup, training, evaluation, prediction, plotting, and integration into the Gemini prompt and PDF report is a significant amount of work. For a hackathon, start with ONE new model (e.g., GRU) and get it fully working with RandomizedSearchCV.
+
+KerasRegressor vs scikeras: Be mindful of your TensorFlow version. If KerasRegressor from tensorflow.keras.wrappers.scikit_learn gives errors, you'll need to install and use scikeras.
+
+input_shape for Tuner: Passing input_shape to the build_fn when using KerasRegressor can be tricky. The method shown in hyperparameter_tuner.py (passing it as a kwarg to KerasRegressor) is one way.
+
+Training Time: RandomizedSearchCV trains multiple models (cv * n_iter). This will significantly increase the processing time of your /train-predict/ endpoint. Keep n_iter and cv low for hackathon speed.
+
+Error Handling: Each new model and tuning step adds more points of potential failure. Robust error handling is key.
+
+Resource Usage: Training multiple deep learning models can be resource-intensive (CPU/Memory, potentially GPU if configured).
+
+Refining utils/data_processing.py: The create_sequences_for_tuner function was added. Ensure it correctly prepares x_train (reshaped) and y_train (1D) as expected by RandomizedSearchCV and KerasRegressor. The input data_scaled_1d_array should be the result of scaler.transform(train_df[['Close']]).
+
+This is a substantial upgrade. Start by integrating the GRU model with RandomizedSearchCV, test thoroughly, and then consider adding more complex models like Transformers or hybrids if time permits. Remember to update your plotting and PDF generation accordingly for each new model.
+
+

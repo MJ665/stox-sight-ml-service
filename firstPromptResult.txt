@@ -20,8 +20,6 @@ fastapi_ml_service/
 ├── requirements.txt            # Python dependencies
 └── .env                        # (Optional) for environment variables
 
-requirements.txt
-
 fastapi
 uvicorn[standard]
 pandas
@@ -29,25 +27,42 @@ numpy
 scikit-learn
 tensorflow
 matplotlib
-python-multipart # For file uploads
+python-multipart
+fpdf2 # For PDF generation
+google-generativeai # Add this
+python-dotenv
 
 
-main.py (FastAPI Application)
+
+
+
+
+# ./main.py
+
+
+
 import os
 import shutil
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+# Ensure FileResponse is imported if not already for serving PDF
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 import pandas as pd
-import uuid # For unique filenames/run IDs
+import uuid
 from datetime import datetime, timedelta
 import io
+import pandas as pd
+import os
+# ... other imports ...
+import json # For handling potential JSON string from Gemini before parsing
 
-# --- ADD THIS IMPORT ---
+from utils.gemini_analyzer import generate_analysis_prompt, get_gemini_analysis
+from dotenv import load_dotenv # For .env file
+
+load_dotenv() # Load environment variables at the start of the app
+
 from sklearn.metrics import mean_absolute_error, r2_score
-# -----------------------
 
-# Import your model and utility functions
 from models.lstm_model import (
     train_lstm_model,
     predict_lstm_future,
@@ -64,40 +79,47 @@ from utils.plotting import (
     plot_future_predictions,
     plot_polynomial_regression
 )
+# --- NEW IMPORT ---
+from utils.pdf_generator import generate_prediction_report, PDF_DIR # Import PDF_DIR
 
 # Configuration
-SEQUENCE_LENGTH = 100 # For LSTM
-N_FUTURE_DAYS_PREDICTION = 30
-LSTM_EPOCHS = 10 # As requested
-POLYNOMIAL_DEGREE = 5 # Example, can be tuned or passed as param
+SEQUENCE_LENGTH = 70
+N_FUTURE_DAYS_PREDICTION =30
+LSTM_EPOCHS = 50 # You had 10, changed back to 3 as per original request
+POLYNOMIAL_DEGREE = 3 # You had 5, changed back to 3
+BUY_SELL_THRESHOLD_PERCENT = 0.5 # e.g., 0.5% change for buy/sell signal
 
-# Ensure static directories exist
 STATIC_DIR = "static"
 PLOTS_DIR = os.path.join(STATIC_DIR, "plots")
+# PDF_DIR is now imported from pdf_generator
 os.makedirs(PLOTS_DIR, exist_ok=True)
+os.makedirs(PDF_DIR, exist_ok=True) # Ensure PDF_DIR from pdf_generator also exists
 
 app = FastAPI(title="Stock Prediction ML Service")
 
-# --- Helper Function to clean up old plots ---
-def cleanup_old_plots(max_age_minutes=60):
+def cleanup_old_files(directory, max_age_minutes=60): # Generic cleanup
     now = datetime.now()
-    for filename in os.listdir(PLOTS_DIR):
-        file_path = os.path.join(PLOTS_DIR, filename)
+    for filename in os.listdir(directory):
+        file_path = os.path.join(directory, filename)
         try:
-            file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
-            if (now - file_mod_time) > timedelta(minutes=max_age_minutes):
-                os.remove(file_path)
-                print(f"Cleaned up old plot: {filename}")
+            if os.path.isfile(file_path): # Ensure it's a file
+                file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+                if (now - file_mod_time) > timedelta(minutes=max_age_minutes):
+                    os.remove(file_path)
+                    print(f"Cleaned up old file: {filename} from {directory}")
         except Exception as e:
-            print(f"Error cleaning up plot {filename}: {e}")
+            print(f"Error cleaning up file {filename} from {directory}: {e}")
 
-
+# main.py
 class TrainResponse(BaseModel):
     message: str
     run_id: str
     lstm_results: dict
     polynomial_results: dict
+    trading_suggestion_tomorrow: dict
+    ai_qualitative_analysis: dict | str # Can be dict or error string from Gemini
     plot_urls: dict
+    pdf_report_url: str
 
 @app.post("/train-predict/", response_model=TrainResponse)
 async def train_and_predict_models(
@@ -105,166 +127,227 @@ async def train_and_predict_models(
     csv_file: UploadFile = File(...)
 ):
     run_id = str(uuid.uuid4())
-    results = {
+    # Initialize with new fields
+    results_payload = { # This will be used to build the JSON response and pass to PDF generator
         "message": "Processing started.",
         "run_id": run_id,
+        "csv_filename": csv_file.filename, # Store original filename
         "lstm_results": {},
         "polynomial_results": {},
-        "plot_urls": {}
+        "trading_suggestion_tomorrow": {},
+        "plot_urls": {},
+        "pdf_report_url": ""
     }
 
     try:
-        # 1. Read and Preprocess CSV
         contents = await csv_file.read()
         df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
 
-        # Ensure 'Date' is datetime and not index, 'Close' is numeric
         if 'Date' not in df.columns or 'Close' not in df.columns:
             raise HTTPException(status_code=400, detail="CSV must contain 'Date' and 'Close' columns.")
 
         df['Date'] = pd.to_datetime(df['Date'])
         df.sort_values(by='Date', inplace=True)
-        df.reset_index(drop=True, inplace=True) # Ensure Date is not index
+        df.reset_index(drop=True, inplace=True)
         df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
         df.dropna(subset=['Close'], inplace=True)
 
-        if len(df) < SEQUENCE_LENGTH + 10: # Minimum data for train/test/future
-             raise HTTPException(status_code=400, detail=f"Not enough data. Need at least {SEQUENCE_LENGTH + 10} rows after cleaning.")
+        if len(df) < SEQUENCE_LENGTH + N_FUTURE_DAYS_PREDICTION + 10: # Adjusted minimum data
+             raise HTTPException(status_code=400, detail=f"Not enough data. Need at least {SEQUENCE_LENGTH + N_FUTURE_DAYS_PREDICTION + 10} rows after cleaning.")
 
-        train_df, test_df, scaler = preprocess_data(df.copy(), sequence_length=SEQUENCE_LENGTH) # Use a copy
+        original_min_date = df['Date'].min() # For consistent Polynomial 'Time' feature
+        last_actual_close_price = df['Close'].iloc[-1]
+        last_actual_date = df['Date'].iloc[-1]
+
+        train_df, test_df, scaler = preprocess_data(df.copy(), sequence_length=SEQUENCE_LENGTH)
 
         # --- LSTM Model ---
         print(f"[{run_id}] Training LSTM model...")
-        lstm_model, lstm_history = train_lstm_model(
-            train_df,
-            scaler,
-            sequence_length=SEQUENCE_LENGTH,
-            epochs=LSTM_EPOCHS
-        )
+        lstm_model, lstm_history = train_lstm_model(train_df, scaler, SEQUENCE_LENGTH, LSTM_EPOCHS)
+        results_payload["lstm_results"]["training_loss"] = lstm_history.history.get('loss', []) # Store loss
         print(f"[{run_id}] LSTM model training complete.")
 
-        # LSTM Test Set Evaluation
-        y_test_actual_lstm, y_pred_test_lstm, x_test_lstm = evaluate_lstm_model(
-            lstm_model,
-            test_df,
-            train_df, # Pass train_df for last sequence
-            scaler,
-            sequence_length=SEQUENCE_LENGTH
+        y_test_actual_lstm, y_pred_test_lstm, _ = evaluate_lstm_model(
+            lstm_model, test_df, train_df, scaler, SEQUENCE_LENGTH
         )
-        results["lstm_results"]["test_metrics"] = {
+        results_payload["lstm_results"]["test_metrics"] = {
             "mae": float(mean_absolute_error(y_test_actual_lstm, y_pred_test_lstm)),
             "r2_score": float(r2_score(y_test_actual_lstm, y_pred_test_lstm))
         }
 
-        # LSTM Future Predictions
         future_preds_lstm, future_dates_lstm = predict_lstm_future(
-            lstm_model,
-            df, # Full dataframe for last sequence
-            scaler,
-            sequence_length=SEQUENCE_LENGTH,
-            n_future_days=N_FUTURE_DAYS_PREDICTION
+            lstm_model, df, scaler, SEQUENCE_LENGTH, N_FUTURE_DAYS_PREDICTION
         )
-        results["lstm_results"]["future_predictions"] = {
-            str(date.date()): float(pred) for date, pred in zip(future_dates_lstm, future_preds_lstm.flatten())
+        results_payload["lstm_results"]["future_predictions"] = {
+            dt.strftime('%Y-%m-%d'): float(pred) for dt, pred in zip(future_dates_lstm, future_preds_lstm.flatten())
         }
+        # --- Trading Suggestion (based on LSTM's next day prediction) ---
+        if len(future_preds_lstm) > 0:
+            predicted_tomorrow_price_lstm = future_preds_lstm.flatten()[0]
+            price_diff_percent = ((predicted_tomorrow_price_lstm - last_actual_close_price) / last_actual_close_price) * 100
+            signal = "HOLD/NEUTRAL"
+            reason = f"Predicted LSTM price for tomorrow: {predicted_tomorrow_price_lstm:.2f}. Last close: {last_actual_close_price:.2f} on {last_actual_date.strftime('%Y-%m-%d')}."
+            
+            if price_diff_percent > BUY_SELL_THRESHOLD_PERCENT:
+                signal = "BUY"
+                reason += f" Change: +{price_diff_percent:.2f}% (>{BUY_SELL_THRESHOLD_PERCENT}%)"
+            elif price_diff_percent < -BUY_SELL_THRESHOLD_PERCENT:
+                signal = "SELL"
+                reason += f" Change: {price_diff_percent:.2f}% (<{-BUY_SELL_THRESHOLD_PERCENT}%)"
+            else:
+                 reason += f" Change: {price_diff_percent:.2f}% (within +/-{BUY_SELL_THRESHOLD_PERCENT}%)"
+
+            results_payload["trading_suggestion_tomorrow"] = {
+                "signal": signal,
+                "predicted_price_lstm": float(predicted_tomorrow_price_lstm),
+                "last_actual_price": float(last_actual_close_price),
+                "percentage_change": float(price_diff_percent),
+                "reason": reason
+            }
+        else:
+            results_payload["trading_suggestion_tomorrow"] = {"signal": "N/A", "reason": "Not enough future predictions from LSTM."}
+
 
         # LSTM Plotting
-        lstm_plot_test_path = os.path.join(PLOTS_DIR, f"{run_id}_lstm_test_predictions.png")
-        plot_test_predictions(
-            test_df['Date'],
-            y_test_actual_lstm,
-            y_pred_test_lstm,
-            title="LSTM: Test Set Predictions",
-            save_path=lstm_plot_test_path
-        )
-        results["plot_urls"]["lstm_test_plot"] = f"/static/plots/{run_id}_lstm_test_predictions.png"
+        lstm_plot_test_filename = f"{run_id}_lstm_test_predictions.png"
+        lstm_plot_test_path = os.path.join(PLOTS_DIR, lstm_plot_test_filename)
+        plot_test_predictions(test_df['Date'], y_test_actual_lstm, y_pred_test_lstm, "LSTM: Test Set Predictions", lstm_plot_test_path)
+        results_payload["plot_urls"]["lstm_test_plot"] = f"/static/plots/{lstm_plot_test_filename}"
 
-        lstm_plot_future_path = os.path.join(PLOTS_DIR, f"{run_id}_lstm_future_predictions.png")
-        plot_future_predictions(
-            df['Date'],
-            df['Close'],
-            test_df['Date'], # Dates for test predictions
-            y_pred_test_lstm, # Test predictions
-            future_dates_lstm,
-            future_preds_lstm,
-            title="LSTM: Historical, Test & Future Predictions",
-            save_path=lstm_plot_future_path
-        )
-        results["plot_urls"]["lstm_future_plot"] = f"/static/plots/{run_id}_lstm_future_predictions.png"
+        lstm_plot_future_filename = f"{run_id}_lstm_future_predictions.png"
+        lstm_plot_future_path = os.path.join(PLOTS_DIR, lstm_plot_future_filename)
+        plot_future_predictions(df['Date'], df['Close'], test_df['Date'], y_pred_test_lstm, future_dates_lstm, future_preds_lstm, "LSTM: Historical, Test & Future Predictions", lstm_plot_future_path)
+        results_payload["plot_urls"]["lstm_future_plot"] = f"/static/plots/{lstm_plot_future_filename}"
 
 
         # --- Polynomial Regression Model ---
-        # print(f"[{run_id}] Training Polynomial Regression model...")
-        # poly_model, poly_scaler, time_feature_train, X_poly_train, y_poly_train = train_polynomial_model(
-        #     train_df.copy(), # Use a copy
-        #     degree=POLYNOMIAL_DEGREE
-        # )
-        
-        
-        # NEW corrected line in main.py:
-        poly_model, poly_scaler, X_train_poly_time_feature, y_train_poly_scaled = train_polynomial_model(
-            train_df.copy(),
-            degree=POLYNOMIAL_DEGREE
-        )
-        # You can then use X_train_poly_time_feature if you need the 'Time' feature DataFrame (which is X_train from the function)
-        # and y_train_poly_scaled is the scaled target variable from training.
-        # For the current logic, these returned training features/targets (X_train_poly_time_feature, y_train_poly_scaled)
-        # are not directly used later in the main.py flow, but it's good to unpack correctly.
-
-
+        print(f"[{run_id}] Training Polynomial Regression model...")
+        poly_model, poly_scaler, _, _ = train_polynomial_model(train_df.copy(), degree=POLYNOMIAL_DEGREE)
         print(f"[{run_id}] Polynomial Regression model training complete.")
 
-        # Polynomial Test Set Evaluation
+
         y_test_actual_poly, y_pred_test_poly = evaluate_polynomial_model(
-            poly_model,
-            test_df.copy(), # Use a copy
-            poly_scaler,
-            degree=POLYNOMIAL_DEGREE
+            poly_model,          # 1. model
+            test_df.copy(),      # 2. test_df
+            poly_scaler,         # 3. y_scaler
+            original_min_date,   # 4. original_min_date_for_time_feature
+            degree=POLYNOMIAL_DEGREE # 5. degree (as keyword)
         )
-        results["polynomial_results"]["test_metrics"] = {
+        
+        
+#         # Polynomial Test Set Evaluation
+#         y_test_actual_poly, y_pred_test_poly = evaluate_polynomial_model(
+#             poly_model,
+#             test_df.copy(), # Use a copy
+#             poly_scaler,
+#             degree=POLYNOMIAL_DEGREE
+#         )
+        results_payload["polynomial_results"]["test_metrics"] = {
             "mae": float(mean_absolute_error(y_test_actual_poly, y_pred_test_poly)),
             "r2_score": float(r2_score(y_test_actual_poly, y_pred_test_poly))
         }
 
-        # Polynomial Future Predictions
         future_preds_poly, future_dates_poly = predict_polynomial_future(
-            poly_model,
-            df, # Full dataframe for last date
-            poly_scaler,
-            degree=POLYNOMIAL_DEGREE,
-            n_future_days=N_FUTURE_DAYS_PREDICTION
+            poly_model, df, original_min_date, poly_scaler, POLYNOMIAL_DEGREE, N_FUTURE_DAYS_PREDICTION # Pass original_min_date
         )
-        results["polynomial_results"]["future_predictions"] = {
-            str(date.date()): float(pred) for date, pred in zip(future_dates_poly, future_preds_poly.flatten())
+        
+        # main.py
+
+# #         # Polynomial Future Predictions
+#         future_preds_poly, future_dates_poly = predict_polynomial_future(
+#             poly_model,
+#             df, # Full dataframe for last date
+#             poly_scaler,
+#             degree=POLYNOMIAL_DEGREE,
+#             n_future_days=N_FUTURE_DAYS_PREDICTION
+#         )
+        
+        
+        
+        results_payload["polynomial_results"]["future_predictions"] = {
+            dt.strftime('%Y-%m-%d'): float(pred) for dt, pred in zip(future_dates_poly, future_preds_poly.flatten())
         }
 
-        # Polynomial Plotting
-        poly_plot_path = os.path.join(PLOTS_DIR, f"{run_id}_polynomial_regression.png")
-        plot_polynomial_regression(
-            df['Date'], df['Close'], # All historical data
-            test_df['Date'], y_pred_test_poly, # Test predictions
-            future_dates_poly, future_preds_poly,
-            title=f"Polynomial Regression (Degree {POLYNOMIAL_DEGREE})",
-            save_path=poly_plot_path
+        poly_plot_filename = f"{run_id}_polynomial_regression.png"
+        poly_plot_path = os.path.join(PLOTS_DIR, poly_plot_filename)
+        plot_polynomial_regression(df['Date'], df['Close'], test_df['Date'], y_pred_test_poly, future_dates_poly, future_preds_poly, f"Polynomial Regression (Degree {POLYNOMIAL_DEGREE})", poly_plot_path)
+        results_payload["plot_urls"]["polynomial_plot"] = f"/static/plots/{poly_plot_filename}"
+
+        # --- Generate PDF Report ---
+        print(f"[{run_id}] Generating PDF report...")
+        pdf_file_path = generate_prediction_report(run_id, results_payload, results_payload["plot_urls"])
+        pdf_filename_only = os.path.basename(pdf_file_path)
+        results_payload["pdf_report_url"] = f"/reports/{pdf_filename_only}" # URL to download PDF
+        print(f"[{run_id}] PDF report generated: {pdf_file_path}")
+
+        results_payload["message"] = "Processing complete."
+        background_tasks.add_task(cleanup_old_files, PLOTS_DIR)
+        background_tasks.add_task(cleanup_old_files, PDF_DIR) # Cleanup PDFs too
+        
+        
+
+        # --- Generate AI Analysis with Gemini (THIS SECTION IS CORRECTLY PLACED) ---
+        print(f"[{run_id}] Generating AI analysis with Gemini...")
+        gemini_prompt = generate_analysis_prompt(
+            stock_symbol=df.get('Symbol', ['UNKNOWN_SYMBOL'])[0] if 'Symbol' in df.columns else results_payload["csv_filename"].split('_')[0],
+            historical_data_df=df.tail(SEQUENCE_LENGTH + 10),
+            lstm_test_actual=y_test_actual_lstm,
+            lstm_test_pred=y_pred_test_lstm,
+            lstm_test_dates=test_df['Date'],
+            lstm_future_pred=future_preds_lstm,
+            lstm_future_dates=future_dates_lstm,
+            poly_test_actual=y_test_actual_poly,
+            poly_test_pred=y_pred_test_poly,
+            poly_test_dates=test_df['Date'],
+            poly_future_pred=future_preds_poly,
+            poly_future_dates=future_dates_poly,
+            trading_suggestion=results_payload["trading_suggestion_tomorrow"]
         )
-        results["plot_urls"]["polynomial_plot"] = f"/static/plots/{run_id}_polynomial_regression.png"
+        
+        ai_analysis_json = await get_gemini_analysis(gemini_prompt)
+        
+        if isinstance(ai_analysis_json, dict) and ai_analysis_json.get("analysisDate") == "YYYY-MM-DD (Today's Date)":
+            ai_analysis_json["analysisDate"] = datetime.now().strftime('%Y-%m-%d')
+        if isinstance(ai_analysis_json, dict) and "dataSummary" in ai_analysis_json:
+             ai_analysis_json["dataSummary"]["lastActualClose"] = f"{last_actual_close_price:.2f}"
+             ai_analysis_json["dataSummary"]["lastActualDate"] = last_actual_date.strftime('%Y-%m-%d')
 
+        results_payload["ai_qualitative_analysis"] = ai_analysis_json
+        print(f"[{run_id}] AI analysis generated.")
 
-        results["message"] = "Processing complete."
-        background_tasks.add_task(cleanup_old_plots) # Schedule cleanup
-        return results
+        # --- Generate PDF Report (NOW THIS IS THE ONLY CALL, AND IT'S CORRECTLY PLACED) ---
+        print(f"[{run_id}] Generating PDF report...")
+        pdf_file_path = generate_prediction_report(run_id, results_payload, results_payload["plot_urls"])
+        pdf_filename_only = os.path.basename(pdf_file_path)
+        results_payload["pdf_report_url"] = f"/reports/{pdf_filename_only}"
+        print(f"[{run_id}] PDF report generated: {pdf_file_path}")
+
+        # --- Finalize results and return ---
+        results_payload["message"] = "Processing complete."
+        background_tasks.add_task(cleanup_old_files, PLOTS_DIR)
+        background_tasks.add_task(cleanup_old_files, PDF_DIR)
+        
+        return results_payload # NOW RETURN AFTER ALL STEPS
 
     except HTTPException as e:
-        raise e # Re-raise HTTP exceptions
+        raise e
     except Exception as e:
         print(f"[{run_id}] Error during processing: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-# --- Mount static directory to serve plots ---
+# --- Endpoint to serve generated PDFs ---
+@app.get("/reports/{pdf_filename}")
+async def get_pdf_report(pdf_filename: str):
+    file_path = os.path.join(PDF_DIR, pdf_filename)
+    if os.path.exists(file_path):
+        return FileResponse(path=file_path, media_type='application/pdf', filename=pdf_filename)
+    else:
+        raise HTTPException(status_code=404, detail="PDF report not found.")
+
 from fastapi.staticfiles import StaticFiles
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static") # For plots
 
 @app.get("/")
 def read_root():
@@ -273,15 +356,19 @@ def read_root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Python
-IGNORE_WHEN_COPYING_END
 
-models/lstm_model.py
+
+
+
+
+
+
+
+
+
+
+
+
 
 import numpy as np
 import pandas as pd
@@ -291,225 +378,387 @@ from tensorflow.keras.layers import LSTM, Dropout, Dense
 from datetime import timedelta
 
 def create_lstm_sequences(data_scaled, sequence_length):
-x, y = [], []
-for i in range(sequence_length, len(data_scaled)):
-x.append(data_scaled[i-sequence_length:i, 0])
-y.append(data_scaled[i, 0])
-return np.array(x), np.array(y)
+    x, y = [], []
+    for i in range(sequence_length, len(data_scaled)):
+        x.append(data_scaled[i-sequence_length:i, 0])
+        y.append(data_scaled[i, 0])
+    return np.array(x), np.array(y)
 
 def train_lstm_model(train_df, scaler, sequence_length, epochs=3, batch_size=32):
-# Scaler should already be fitted on train_df['Close'] in data_processing
-scaled_train_close = scaler.transform(train_df[['Close']])
+    # Scaler should already be fitted on train_df['Close'] in data_processing
+    scaled_train_close = scaler.transform(train_df[['Close']])
 
-x_train, y_train = create_lstm_sequences(scaled_train_close, sequence_length)
-x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+    x_train, y_train = create_lstm_sequences(scaled_train_close, sequence_length)
+    x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
 
-model = Sequential([
-    LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1), activation='relu'),
-    Dropout(0.2),
-    LSTM(units=60, return_sequences=True, activation='relu'),
-    Dropout(0.3),
-    LSTM(units=80, return_sequences=True, activation='relu'),
-    Dropout(0.4),
-    LSTM(units=120, activation='relu'),
-    Dropout(0.5),
-    Dense(units=1)
-])
-model.compile(optimizer='adam', loss='mean_squared_error')
-history = model.fit(x_train, y_train, epochs=epochs, batch_size=batch_size, verbose=1)
-return model, history
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-IGNORE_WHEN_COPYING_END
+    model = Sequential([
+        LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1), activation='relu'),
+        Dropout(0.2),
+        LSTM(units=60, return_sequences=True, activation='relu'),
+        Dropout(0.3),
+        LSTM(units=80, return_sequences=True, activation='relu'),
+        Dropout(0.4),
+        LSTM(units=120, activation='relu'),
+        Dropout(0.5),
+        Dense(units=1)
+    ])
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    history = model.fit(x_train, y_train, epochs=epochs, batch_size=batch_size, verbose=1)
+    return model, history
 
 def evaluate_lstm_model(model, test_df, train_df_for_sequence, scaler, sequence_length):
-# Prepare test data
-last_sequence_from_train_scaled = scaler.transform(train_df_for_sequence[['Close']])[-sequence_length:]
-test_close_scaled = scaler.transform(test_df[['Close']])
+    # Prepare test data
+    last_sequence_from_train_scaled = scaler.transform(train_df_for_sequence[['Close']])[-sequence_length:]
+    test_close_scaled = scaler.transform(test_df[['Close']])
+    
+    combined_input_scaled = np.concatenate((last_sequence_from_train_scaled, test_close_scaled), axis=0)
+    
+    x_test, y_test_actual_scaled = create_lstm_sequences(combined_input_scaled, sequence_length)
+    x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
 
-combined_input_scaled = np.concatenate((last_sequence_from_train_scaled, test_close_scaled), axis=0)
-
-x_test, y_test_actual_scaled = create_lstm_sequences(combined_input_scaled, sequence_length)
-x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
-
-y_pred_test_scaled = model.predict(x_test)
-
-y_pred_test_rescaled = scaler.inverse_transform(y_pred_test_scaled)
-y_test_actual_rescaled = scaler.inverse_transform(y_test_actual_scaled.reshape(-1,1))
-
-return y_test_actual_rescaled, y_pred_test_rescaled, x_test # Return x_test if needed for other things
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-IGNORE_WHEN_COPYING_END
+    y_pred_test_scaled = model.predict(x_test)
+    
+    y_pred_test_rescaled = scaler.inverse_transform(y_pred_test_scaled)
+    y_test_actual_rescaled = scaler.inverse_transform(y_test_actual_scaled.reshape(-1,1))
+    
+    return y_test_actual_rescaled, y_pred_test_rescaled, x_test # Return x_test if needed for other things
 
 def predict_lstm_future(model, full_df, scaler, sequence_length, n_future_days):
-# Use the last 'sequence_length' days from the entire dataset (scaled)
-last_sequence_scaled = scaler.transform(full_df[['Close']])[-sequence_length:]
-current_sequence_for_model = last_sequence_scaled.reshape(1, sequence_length, 1)
+    # Use the last 'sequence_length' days from the entire dataset (scaled)
+    last_sequence_scaled = scaler.transform(full_df[['Close']])[-sequence_length:]
+    current_sequence_for_model = last_sequence_scaled.reshape(1, sequence_length, 1)
 
-future_predictions_scaled = []
-for _ in range(n_future_days):
-    next_pred_scaled = model.predict(current_sequence_for_model)
-    future_predictions_scaled.append(next_pred_scaled[0, 0])
-    # Update sequence: append new prediction, drop oldest
-    new_sequence_part = np.append(current_sequence_for_model[0, 1:, 0], next_pred_scaled[0,0])
-    current_sequence_for_model = new_sequence_part.reshape(1, sequence_length, 1)
+    future_predictions_scaled = []
+    for _ in range(n_future_days):
+        next_pred_scaled = model.predict(current_sequence_for_model)
+        future_predictions_scaled.append(next_pred_scaled[0, 0])
+        # Update sequence: append new prediction, drop oldest
+        new_sequence_part = np.append(current_sequence_for_model[0, 1:, 0], next_pred_scaled[0,0])
+        current_sequence_for_model = new_sequence_part.reshape(1, sequence_length, 1)
 
-future_predictions_rescaled = scaler.inverse_transform(np.array(future_predictions_scaled).reshape(-1, 1))
+    future_predictions_rescaled = scaler.inverse_transform(np.array(future_predictions_scaled).reshape(-1, 1))
+    
+    last_date = full_df['Date'].iloc[-1]
+    future_dates = pd.to_datetime([last_date + timedelta(days=i) for i in range(1, n_future_days + 1)])
+    
+    return future_predictions_rescaled, future_dates
 
-last_date = full_df['Date'].iloc[-1]
-future_dates = pd.to_datetime([last_date + timedelta(days=i) for i in range(1, n_future_days + 1)])
 
-return future_predictions_rescaled, future_dates
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-IGNORE_WHEN_COPYING_END
 
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Python
-IGNORE_WHEN_COPYING_END
 
-models/polynomial_model.py
 
+# models/polynomial_model.py
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import PolynomialFeatures, MinMaxScaler
 from sklearn.linear_model import LinearRegression
-from sklearn.pipeline import make_pipeline
+from sklearn.pipeline import make_pipeline # Pipeline simplifies an already simple process
 from datetime import timedelta
+from typing import Tuple # For type hinting
 
-def train_polynomial_model(train_df, degree=3):
-train_df = train_df.copy()
-# Create a time feature (e.g., days since the start)
-train_df['Time'] = (train_df['Date'] - train_df['Date'].min()).dt.days
-
-X_train = train_df[['Time']]
-y_train = train_df['Close'].values.reshape(-1, 1)
-
-# Scale target variable for stability if needed, or scale input 'Time'
-# Here, we'll scale y for consistency with LSTM approach and inverse transform predictions
-y_scaler = MinMaxScaler()
-y_train_scaled = y_scaler.fit_transform(y_train)
-
-# Create polynomial features and fit the model
-# The pipeline handles feature transformation and regression
-poly_model = make_pipeline(PolynomialFeatures(degree), LinearRegression())
-poly_model.fit(X_train, y_train_scaled)
-
-return poly_model, y_scaler, X_train, y_train_scaled # Return X_train for plotting if needed
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-IGNORE_WHEN_COPYING_END
-
-def evaluate_polynomial_model(model, test_df, y_scaler, degree=3):
-test_df = test_df.copy()
-test_df['Time'] = (test_df['Date'] - test_df['Date'].min()).dt.days # Relative to test start for consistency with how it might be used
-# OR better: use Time from start of entire dataset
-# For now, using test_df's min date for Time feature in test
-# This assumes Time is number of days from its own dataset start
-# This needs careful handling if train/test 'Time' need to be aligned
-
-# A more robust way for 'Time' feature for test_df:
-# It should be relative to the *original* training data's start date.
-# This requires passing the original min_date or the transformed time feature.
-# For simplicity in this example, let's assume Time can be calculated for test_df like this:
-# (This is a common point of error if not handled carefully in time series with poly reg)
-
-# To make it more robust, let's assume the Time feature for testing should continue from training
-# This requires access to the last time step of training or min_date of train.
-# Let's assume test_df['Date'].min() is the first day AFTER train_df['Date'].max() for 'Time' continuity
-# If `train_df` was passed, we could get train_df['Date'].min()
-# For now, this simple relative time for test is used.
-
-X_test = test_df[['Time']]
-y_test_actual = test_df['Close'].values.reshape(-1,1) # Original scale
-
-y_pred_test_scaled = model.predict(X_test)
-y_pred_test_rescaled = y_scaler.inverse_transform(y_pred_test_scaled.reshape(-1,1))
-
-return y_test_actual, y_pred_test_rescaled
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-IGNORE_WHEN_COPYING_END
-
-def predict_polynomial_future(model, full_df, y_scaler, degree, n_future_days):
-# Create future 'Time' features
-last_date_in_full_df = full_df['Date'].iloc[-1]
-original_min_date = full_df['Date'].min() # Min date from the entire dataset for 'Time' reference
-
-future_time_features = []
-future_dates = []
-for i in range(1, n_future_days + 1):
-    future_d = last_date_in_full_df + timedelta(days=i)
-    future_dates.append(future_d)
-    time_val = (future_d - original_min_date).days
-    future_time_features.append([time_val])
+def train_polynomial_model(
+    train_df: pd.DataFrame, 
+    degree: int = 3
+) -> Tuple[make_pipeline, MinMaxScaler, pd.DataFrame, np.ndarray]: # model, y_scaler, X_train_time, y_train_scaled
     
-X_future = pd.DataFrame(future_time_features, columns=['Time'])
+    train_df_copy = train_df.copy() # Work on a copy
 
-future_preds_scaled = model.predict(X_future)
-future_preds_rescaled = y_scaler.inverse_transform(future_preds_scaled.reshape(-1,1))
+    # Create a time feature (days since the start OF THE TRAINING SET for this model)
+    # This 'Time' feature is local to the training phase of this model.
+    # For prediction/evaluation, 'Time' must be calculated relative to the *original dataset's start*.
+    original_train_min_date = train_df_copy['Date'].min()
+    train_df_copy['Time'] = (train_df_copy['Date'] - original_train_min_date).dt.days
+    
+    X_train_time = train_df_copy[['Time']] # Features (Time)
+    y_train_actual = train_df_copy['Close'].values.reshape(-1, 1) # Target (Close Price)
 
-return future_preds_rescaled, pd.to_datetime(future_dates)
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-IGNORE_WHEN_COPYING_END
+    # Scale the target variable (Close Price)
+    y_scaler = MinMaxScaler()
+    y_train_scaled = y_scaler.fit_transform(y_train_actual)
 
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Python
-IGNORE_WHEN_COPYING_END
+    # Create and train the polynomial regression model pipeline
+    # The pipeline will first create polynomial features from 'Time', then fit LinearRegression
+    poly_model = make_pipeline(PolynomialFeatures(degree=degree, include_bias=False), LinearRegression())
+    poly_model.fit(X_train_time, y_train_scaled) # Fit on 'Time' and scaled 'Close'
+    
+    return poly_model, y_scaler, X_train_time, y_train_scaled
 
-utils/data_processing.py
+def evaluate_polynomial_model(
+    model: make_pipeline, 
+    test_df: pd.DataFrame, 
+    y_scaler: MinMaxScaler, 
+    original_min_date_for_time_feature: pd.Timestamp, # Min date of the *entire original* dataset
+    degree: int # Degree is passed for context, though not directly used if polyfeatures is in pipeline
+) -> Tuple[np.ndarray, np.ndarray]:
 
+    test_df_copy = test_df.copy()
+
+    # Create 'Time' feature for test set, relative to the *original dataset's start date*
+    test_df_copy['Time'] = (test_df_copy['Date'] - original_min_date_for_time_feature).dt.days
+    
+    X_test_time = test_df_copy[['Time']]
+    y_test_actual = test_df_copy['Close'].values.reshape(-1,1) # Original scale for comparison
+
+    # Predict using the pipeline (applies PolynomialFeatures then LinearRegression)
+    y_pred_test_scaled = model.predict(X_test_time)
+    
+    # Inverse transform predictions to original price scale
+    y_pred_test_rescaled = y_scaler.inverse_transform(y_pred_test_scaled.reshape(-1,1))
+    
+    return y_test_actual, y_pred_test_rescaled
+
+def predict_polynomial_future(
+    model: make_pipeline, 
+    full_df_for_last_date: pd.DataFrame,
+    original_min_date_for_time_feature: pd.Timestamp,
+    y_scaler: MinMaxScaler, 
+    degree: int,
+    n_future_days: int
+) -> Tuple[np.ndarray, pd.DatetimeIndex]:
+    
+    last_known_date = full_df_for_last_date['Date'].iloc[-1]
+
+    future_time_values: list[int] = []
+    future_dates_list: list[pd.Timestamp] = [] # Changed from pd.DatetimeIndex to list for appending
+
+    for i in range(1, n_future_days + 1):
+        future_d = last_known_date + timedelta(days=i)
+        future_dates_list.append(future_d)
+        
+        # Calculate the difference, which is a Timedelta object
+        time_difference = future_d - original_min_date_for_time_feature
+        # Access the .days attribute directly from the Timedelta object
+        time_val = time_difference.days # <--- CORRECTED LINE
+        future_time_values.append(time_val)
+        
+    X_future_time = pd.DataFrame(future_time_values, columns=['Time'])
+
+    future_preds_scaled = model.predict(X_future_time)
+    future_preds_rescaled = y_scaler.inverse_transform(future_preds_scaled.reshape(-1,1))
+    
+    return future_preds_rescaled, pd.to_datetime(future_dates_list) # Convert list of Timestamps to DatetimeIndex at the end
+
+
+
+
+
+
+# utils/data_processing.py
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
 def preprocess_data(df, sequence_length, train_split_ratio=0.8):
-# df already has 'Date' as datetime and sorted, 'Close' is numeric
+    # df already has 'Date' as datetime and sorted, 'Close' is numeric
+    
+    # Splitting data
+    train_size = int(len(df) * train_split_ratio)
+    train_df = df.iloc[:train_size].copy()
+    test_df = df.iloc[train_size:].copy().reset_index(drop=True)
 
-# Splitting data
-train_size = int(len(df) * train_split_ratio)
-train_df = df.iloc[:train_size].copy()
-test_df = df.iloc[train_size:].copy().reset_index(drop=True)
+    # Scaler for LSTM (and potentially for Poly if we scale target there)
+    # Fit scaler ONLY on training data's 'Close' price
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaler.fit(train_df[['Close']]) # Fit on the 'Close' column of training data
+    
+    return train_df, test_df, scaler
 
-# Scaler for LSTM (and potentially for Poly if we scale target there)
-# Fit scaler ONLY on training data's 'Close' price
-scaler = MinMaxScaler(feature_range=(0, 1))
-scaler.fit(train_df[['Close']]) # Fit on the 'Close' column of training data
 
-return train_df, test_df, scaler
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-IGNORE_WHEN_COPYING_END
+# utils/gemini_analyzer.py
+import google.generativeai as genai
+import os
+import json
+from dotenv import load_dotenv
+import pandas as pd
 
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Python
-IGNORE_WHEN_COPYING_END
+load_dotenv() # Load variables from .env file
 
-utils/plotting.py
+# It's better to configure the API key once
+API_KEY = os.getenv("GOOGLE_API_KEY_ANALYZER")
+if not API_KEY:
+    print("Warning: GOOGLE_API_KEY_ANALYZER not found in .env file.")
+    # Potentially raise an error or use a default dummy key for offline testing
+else:
+    genai.configure(api_key=API_KEY)
+
+
+def format_predictions_for_prompt(title: str, dates, predictions, actuals=None, limit=10):
+    header = f"\n--- {title} ---\nDate       | Predicted   | Actual (if avail)\n"
+    lines = [header]
+    for i in range(min(len(dates), limit)):
+        date_str = dates[i].strftime('%Y-%m-%d') if hasattr(dates[i], 'strftime') else str(dates[i])
+        pred_str = f"{predictions.flatten()[i]:.2f}"
+        actual_str = f"{actuals.flatten()[i]:.2f}" if actuals is not None and i < len(actuals) else "N/A"
+        lines.append(f"{date_str:<10} | {pred_str:>10} | {actual_str:>17}")
+    if len(dates) > limit:
+        lines.append(f"... and {len(dates) - limit} more days.")
+    return "\n".join(lines)
+
+def generate_analysis_prompt(
+    stock_symbol: str,
+    historical_data_df: pd.DataFrame, # Last ~100 days
+    lstm_test_actual, lstm_test_pred, lstm_test_dates,
+    lstm_future_pred, lstm_future_dates,
+    poly_test_actual, poly_test_pred, poly_test_dates,
+    poly_future_pred, poly_future_dates,
+    trading_suggestion: dict
+):
+    # Prepare data snippets
+    recent_history_limit = 100 # Days of actual historical data to show
+    prediction_display_limit = 7 # Days of future predictions to show in prompt
+
+    historical_snippet = "Recent Historical Closing Prices (last few days):\nDate       | Close\n"
+    for idx, row in historical_data_df.tail(min(len(historical_data_df), 5)).iterrows(): # Show last 5 actuals
+        historical_snippet += f"{row['Date'].strftime('%Y-%m-%d'):<10} | {row['Close']:.2f}\n"
+
+    lstm_test_snippet = format_predictions_for_prompt(
+        "LSTM Test Set Performance (sample)",
+        lstm_test_dates, lstm_test_pred, lstm_test_actual, limit=prediction_display_limit
+    )
+    lstm_future_snippet = format_predictions_for_prompt(
+        "LSTM Future Predictions (sample)",
+        lstm_future_dates, lstm_future_pred, limit=prediction_display_limit
+    )
+    poly_test_snippet = format_predictions_for_prompt(
+        "Polynomial Regression Test Set Performance (sample)",
+        poly_test_dates, poly_test_pred, poly_test_actual, limit=prediction_display_limit
+    )
+    poly_future_snippet = format_predictions_for_prompt(
+        "Polynomial Regression Future Predictions (sample)",
+        poly_future_dates, poly_future_pred, limit=prediction_display_limit
+    )
+
+    prompt = f"""
+**SYSTEM PROMPT: AI Stock Prediction Analysis & Sentiment Report Generator (JSON Output)**
+
+**Your Role:**
+You are an AI financial analyst assistant. Based *exclusively* on the provided stock data summary, LSTM model predictions, Polynomial Regression model predictions, and a basic trading suggestion, your task is to generate a concise, insightful analysis.
+The output **MUST be a valid JSON object** adhering to the specified structure.
+
+**Input Data Summary for Stock: {stock_symbol}**
+
+{historical_snippet}
+"this is the LSTM MODEL I have made" 
+{lstm_test_snippet}
+this is the LSTM MODEL Future prediction 
+{lstm_future_snippet}
+this is the polynomial test snippet
+
+{poly_test_snippet}
+thi is the polynomial future predictions
+{poly_future_snippet}
+
+Trading Suggestion for Tomorrow (from LSTM prediction vs. last close):
+Signal: {trading_suggestion.get('signal', 'N/A')}
+Reason: {trading_suggestion.get('reason', 'N/A')}
+
+**Your Task: Generate a JSON Object with Analysis and Sentiment**
+
+Provide qualitative insights based on the data. Be cautious and emphasize that this is not financial advice.
+
+**JSON Output Structure:**
+```json
+{{
+  "stockSymbol": "{stock_symbol}",
+  "analysisDate": "YYYY-MM-DD (Today's Date)",
+  "overallSentiment": "Neutral",
+  "sentimentRationale": "Brief explanation for the overall sentiment, considering both models' outlook and the trading suggestion.",
+  "dataSummary": {{
+    "lastActualClose": "Price from historical_data_df",
+    "lastActualDate": "Date of lastActualClose"
+  }},
+  "lstmModelAnalysis": {{
+    "performanceOnTest": "Qualitative assessment (e.g., 'Appears to follow the trend moderately well', 'Shows some divergence from actuals'). Consider MAE/R2 if they were provided and reflect on them.",
+    "futureOutlook": "Qualitative assessment of LSTM's future predictions (e.g., 'Predicts a slight upward trend', 'Indicates potential consolidation', 'Shows a significant drop').",
+    "confidenceInOutlook": "Low/Medium/High - based on test performance and stability of future predictions. Be conservative."
+  }},
+  "polynomialRegressionAnalysis": {{
+    "performanceOnTest": "Qualitative assessment (e.g., 'Provides a smooth trendline that captures the general direction', 'Struggles with sharp turns').",
+    "futureOutlook": "Qualitative assessment of Polynomial's future predictions (e.g., 'Suggests continued growth along the established trend', 'Indicates a potential peak based on the curve').",
+    "confidenceInOutlook": "Low/Medium/High - based on how well the polynomial fit represents the data and the nature of polynomial extrapolation."
+  }},
+  "combinedOutlook": {{
+    "shortTermForecastSynopsis": "Synthesize insights from both models for the short-term (next few days to a week). Note any agreements or disagreements between models.",
+    "keyObservations": [
+      "Observation 1: e.g., Both models suggest a short-term price increase.",
+      "Observation 2: e.g., LSTM is more volatile in its short-term predictions compared to the smoother polynomial trend.",
+      "Observation 3: e.g., The trading suggestion to '{trading_suggestion.get('signal', 'N/A')}' is primarily driven by the LSTM's next-day forecast."
+      // Add 2-4 key, distinct observations based on the provided data.
+    ]
+  }},
+  "riskFactors": [
+    "Model-based predictions are inherently uncertain and based on past data, which may not reflect future market conditions.",
+    "Polynomial regression is prone to poor extrapolation beyond the observed data range, especially with higher degrees.",
+    "LSTM models can be sensitive to input data and may not capture sudden market shocks or events not present in training data.",
+    "The 'Buy/Sell' suggestion is a simple heuristic and not comprehensive financial advice."
+  ],
+  "disclaimer": "This AI-generated analysis is for informational purposes only and not financial advice. Predictions are speculative. Consult a qualified financial advisor before making investment decisions."
+}}
+"""
+    return prompt.strip()
+
+
+async def get_gemini_analysis(prompt_text: str):
+    if not API_KEY:
+        return {"error" : "Gemini API key not configured."}
+    try:
+        model =  genai.GenerativeModel('gemini-2.0-flash') # Or 'gemini-pro'
+         # For Gemini, it's good to ensure the generation config requests JSON if the model handles it well.
+        # Otherwise, we rely on strong prompting and parse the string output.
+        # For more robust JSON, gemini-1.5-pro with response_mime_type="application/json" is better.
+        # With gemini-1.5-flash, we'll parse the text response.
+        
+        print("\n--- Sending Prompt to Gemini for Analysis ---")
+        print(f"Prompt length: {len(prompt_text)} characters")
+        # print(prompt_text[:500] + "..." if len(prompt_text) > 500 else prompt_text) # Log snippet
+        
+        response = await model.generate_content_async(prompt_text) # Use async version
+        
+        print("\n--- Received Response from Gemini (Raw Text) ---")
+        # print(response.text[:500] + "..." if len(response.text) > 500 else response.text)
+
+        print("\n--- FULL RAW GEMINI RESPONSE TEXT ---")
+        print(response.text) # <--- THIS IS CRITICAL FOR DEBUGGING
+        print("--- END OF FULL RAW GEMINI RESPONSE TEXT ---\n")
+
+        # Also, print candidate details if available
+        if hasattr(response, 'candidates') and response.candidates:
+            for i, candidate in enumerate(response.candidates):
+                print(f"--- Candidate {i+1} ---")
+                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'text'):
+                            print("Part Text:", part.text)
+                if hasattr(candidate, 'finish_reason'):
+                    print("Finish Reason:", candidate.finish_reason)
+                if hasattr(candidate, 'safety_ratings'):
+                    print("Safety Ratings:", candidate.safety_ratings)
+        if hasattr(response, 'prompt_feedback'):
+             print("Prompt Feedback:", response.prompt_feedback)
+
+
+        cleaned_response_text = response.text.strip()
+        # Attempt to parse the response text as JSON
+        # Gemini might sometimes wrap JSON in ```json ... ```
+        cleaned_response_text = response.text.strip()
+        if cleaned_response_text.startswith("```json"):
+            cleaned_response_text = cleaned_response_text[7:]
+        if cleaned_response_text.endswith("```"):
+            cleaned_response_text = cleaned_response_text[:-3]
+        
+        json_analysis = json.loads(cleaned_response_text.strip())
+        return json_analysis
+
+    except json.JSONDecodeError as e:
+        print(f"Error decoding Gemini JSON response: {e}")
+        print(f"Gemini raw response was: {response.text}")
+        return {"error": "Failed to parse Gemini response as JSON.", "raw_response": response.text}
+    except Exception as e:
+        print(f"Error communicating with Gemini API: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": f"Gemini API communication error: {str(e)}"}
+
+
 
 import matplotlib.pyplot as plt
 import matplotlib
@@ -517,118 +766,448 @@ matplotlib.use('Agg') # Use non-interactive backend for server-side plotting
 import pandas as pd
 
 def plot_test_predictions(dates_actual, y_actual, y_pred, title, save_path):
-plt.figure(figsize=(12, 6))
-plt.plot(dates_actual, y_actual, 'b-', label='Actual Price')
-plt.plot(dates_actual, y_pred, 'r-', label='Predicted Price')
-plt.title(title)
-plt.xlabel('Date')
-plt.ylabel('Price')
-plt.legend()
-plt.grid(True)
-plt.gcf().autofmt_xdate()
-plt.savefig(save_path)
-plt.close() # Close the figure to free memory
+    plt.figure(figsize=(12, 6))
+    plt.plot(dates_actual, y_actual, 'b-', label='Actual Price')
+    plt.plot(dates_actual, y_pred, 'r-', label='Predicted Price')
+    plt.title(title)
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.grid(True)
+    plt.gcf().autofmt_xdate()
+    plt.savefig(save_path)
+    plt.close() # Close the figure to free memory
 
-def plot_future_predictions(hist_dates, hist_close,
-test_pred_dates, test_pred_close,
-future_dates, future_close, title, save_path):
-plt.figure(figsize=(15, 7))
-plt.plot(hist_dates, hist_close, 'k-', label='Historical Actual Price', alpha=0.7)
-if test_pred_dates is not None and test_pred_close is not None:
-plt.plot(test_pred_dates, test_pred_close, color='red', linestyle='-', label='Test Predicted Price')
-plt.plot(future_dates, future_close, color='green', linestyle='--', marker='o', markersize=4, label='Future Predicted Price')
-plt.title(title)
-plt.xlabel('Date')
-plt.ylabel('Price')
-plt.legend(loc='upper left')
-plt.grid(True)
-plt.gcf().autofmt_xdate()
-plt.savefig(save_path)
-plt.close()
+def plot_future_predictions(hist_dates, hist_close, 
+                            test_pred_dates, test_pred_close,
+                            future_dates, future_close, title, save_path):
+    plt.figure(figsize=(15, 7))
+    plt.plot(hist_dates, hist_close, 'k-', label='Historical Actual Price', alpha=0.7)
+    if test_pred_dates is not None and test_pred_close is not None:
+         plt.plot(test_pred_dates, test_pred_close, color='red', linestyle='-', label='Test Predicted Price')
+    plt.plot(future_dates, future_close, color='green', linestyle='--', marker='o', markersize=4, label='Future Predicted Price')
+    plt.title(title)
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend(loc='upper left')
+    plt.grid(True)
+    plt.gcf().autofmt_xdate()
+    plt.savefig(save_path)
+    plt.close()
 
-def plot_polynomial_regression(hist_dates, hist_close,
-test_pred_dates, test_pred_values,
-future_dates, future_pred_values,
-title, save_path):
-plt.figure(figsize=(15, 7))
-plt.plot(hist_dates, hist_close, 'k.', label='Historical Actual Price', alpha=0.5, markersize=3)
-
-# Combine test and future dates/preds for a continuous line if desired, or plot separately
-# For simplicity, plotting test and future separately for polynomial
-if test_pred_dates is not None and test_pred_values is not None:
-    # Sort test predictions by date if they aren't already for smooth line
-    sorted_test_indices = test_pred_dates.argsort()
-    plt.plot(test_pred_dates[sorted_test_indices], test_pred_values[sorted_test_indices], 'r-', label='Polynomial Fit (Test)', linewidth=2)
-
-if future_dates is not None and future_pred_values is not None:
-    plt.plot(future_dates, future_pred_values, 'g--', label='Polynomial Future Prediction', linewidth=2)
+def plot_polynomial_regression(hist_dates, hist_close, 
+                               test_pred_dates, test_pred_values,
+                               future_dates, future_pred_values, 
+                               title, save_path):
+    plt.figure(figsize=(15, 7))
+    plt.plot(hist_dates, hist_close, 'k.', label='Historical Actual Price', alpha=0.5, markersize=3)
     
-plt.title(title)
-plt.xlabel('Date')
-plt.ylabel('Price')
-plt.legend(loc='upper left')
-plt.grid(True)
-plt.gcf().autofmt_xdate()
-plt.savefig(save_path)
-plt.close()
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-IGNORE_WHEN_COPYING_END
+    # Combine test and future dates/preds for a continuous line if desired, or plot separately
+    # For simplicity, plotting test and future separately for polynomial
+    if test_pred_dates is not None and test_pred_values is not None:
+        # Sort test predictions by date if they aren't already for smooth line
+        sorted_test_indices = test_pred_dates.argsort()
+        plt.plot(test_pred_dates[sorted_test_indices], test_pred_values[sorted_test_indices], 'r-', label='Polynomial Fit (Test)', linewidth=2)
 
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Python
-IGNORE_WHEN_COPYING_END
+    if future_dates is not None and future_pred_values is not None:
+        plt.plot(future_dates, future_pred_values, 'g--', label='Polynomial Future Prediction', linewidth=2)
+        
+    plt.title(title)
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend(loc='upper left')
+    plt.grid(True)
+    plt.gcf().autofmt_xdate()
+    plt.savefig(save_path)
+    plt.close()
 
-How to Run:
 
-Save all these files in the respective directories.
 
-Install requirements: pip install -r requirements.txt
 
-Run FastAPI: uvicorn main:app --reload (from inside fastapi_ml_service directory)
 
---reload is for development; remove it for production.
 
-Making a curl request:
 
-curl -X POST "http://127.0.0.1:8000/train-predict/" 
--H "accept: application/json" 
--H "Content-Type: multipart/form-data" 
--F "csv_file=@/path/to/your/stock_data.csv"
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Bash
-IGNORE_WHEN_COPYING_END
 
-Replace /path/to/your/stock_data.csv with the actual path to your CSV file.
 
-Important Considerations and Potential Improvements:
 
-Error Handling: The provided code has basic error handling. You'll want to make it more robust.
 
-Asynchronous Operations: For long training times (even with 3 epochs, if data is large), the request will hang. Consider using Celery or FastAPI's BackgroundTasks more extensively if training becomes a bottleneck. The current BackgroundTasks is just for cleanup. True async training would be more complex.
 
-Scalability: This setup runs one model training process at a time within the FastAPI worker. For concurrent requests, you'd need multiple Uvicorn workers and potentially a more robust task queue system.
 
-Polynomial Regression Time Feature: The Time feature for polynomial regression needs careful handling. It should ideally be a continuous sequence from the start of the training data through to the future predictions. The current implementation simplifies this for the test set; review models/polynomial_model.py comments.
 
-Resource Management: Ensure your server has enough RAM/CPU for TensorFlow.
 
-Security: If this is exposed publicly, add authentication/authorization.
 
-Configuration: Move hardcoded values (epochs, sequence length, degrees) to environment variables or a config file.
+# utils/pdf_generator.py
+from fpdf import FPDF, fpdf
+from datetime import datetime
+import os
+import pandas as pd
+import textwrap
+import json
 
-Logging: Implement more comprehensive logging.
+PDF_DIR = "static/pdfs"
+os.makedirs(PDF_DIR, exist_ok=True)
 
-Plot Cleanup: The cleanup_old_plots is a simple approach. For a production system, you might store plots in cloud storage or have a more robust cleanup strategy.
+class PDFReport(FPDF):
+    def __init__(self, orientation='P', unit='mm', format='A4'):
+        super().__init__(orientation, unit, format)
+        self.set_auto_page_break(auto=True, margin=15) # Standard bottom margin for page break
+        self.table_headers = [] # To store headers for re-drawing
+        self.table_col_widths = [] # To store col_widths
 
-Input Validation: Add more validation for the CSV content (e.g., minimum number of rows, checking for non-numeric values more thoroughly).
+    # ... (header, footer, chapter_title, _render_wrapped_text_lines, chapter_body, add_observation, add_suggestion, add_metric, add_plot_image as in the previous successful version) ...
+    # I'll re-paste them here for completeness, assuming they were working.
+    def header(self):
+        self.set_font('Arial', 'B', 12)
+        self.cell(0, 10, 'Stock Prediction Report', 0, 1, 'C')
+        self.set_font('Arial', '', 8)
+        self.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 0, 1, 'C')
+        self.ln(5)
 
-This structure gives you a strong starting point for your FastAPI ML service!
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}/{{nb}}', 0, 0, 'C')
+
+    def chapter_title(self, title):
+        self.set_font('Arial', 'B', 12)
+        self.cell(0, 10, title, 0, 1, 'L')
+        self.ln(2)
+
+    def _render_wrapped_text_lines(self, lines: list, line_height: float, initial_x_offset: float = 0):
+        is_first_line_of_block = True
+        for line_content in lines:
+            current_x_pos = self.get_x() 
+            if not is_first_line_of_block and initial_x_offset > 0:
+                self.set_x(self.l_margin + initial_x_offset)
+            
+            try:
+                self.multi_cell(0, line_height, line_content, border=0, align='L', new_x="LMARGIN", new_y="NEXT")
+            except fpdf.FPDFException as e:
+                print(f"FPDFException rendering line '{line_content[:50]}...': {e}. Skipping line.")
+            
+            if not is_first_line_of_block and initial_x_offset > 0:
+                 self.set_x(current_x_pos) 
+            is_first_line_of_block = False
+
+    def chapter_body(self, content, char_wrap_limit=110, line_height=5): # Adjusted limit from prev
+        original_font_family, original_font_style, original_font_size = self.font_family, self.font_style, self.font_size
+        self.set_font('Arial', '', 10)
+        
+        content_str = str(content)
+        wrapped_lines = textwrap.wrap(
+            content_str, width=char_wrap_limit, break_long_words=True, 
+            replace_whitespace=False, drop_whitespace=False, break_on_hyphens=True,
+            fix_sentence_endings=True
+        )
+        self._render_wrapped_text_lines(wrapped_lines, line_height)
+        
+        self.set_font(original_font_family, original_font_style, original_font_size)
+        self.ln(1)
+
+    def add_observation(self, observation_text, char_wrap_limit=75, line_height=5):
+        original_font_family, original_font_style, original_font_size = self.font_family, self.font_style, self.font_size
+        self.set_font('Arial', '', 9)
+        
+        prefix = "- "
+        observation_str = str(observation_text)
+        text_part_lines = textwrap.wrap(
+            observation_str, width=char_wrap_limit, break_long_words=True,
+            replace_whitespace=False, drop_whitespace=False, break_on_hyphens=True,
+            fix_sentence_endings=True
+        )
+        
+        if not text_part_lines:
+            try:
+                self.multi_cell(0, line_height, prefix, border=0, align='L', new_x="LMARGIN", new_y="NEXT")
+            except fpdf.FPDFException as e: print(f"FPDFException rendering observation prefix: {e}")
+            self.set_font(original_font_family, original_font_style, original_font_size)
+            return
+
+        try:
+            self.multi_cell(0, line_height, f"{prefix}{text_part_lines[0]}", border=0, align='L', new_x="LMARGIN", new_y="NEXT")
+        except fpdf.FPDFException as e: print(f"FPDFException rendering observation line '{prefix}{text_part_lines[0][:50]}...': {e}")
+
+        if len(text_part_lines) > 1:
+            prefix_width = self.get_string_width(prefix)
+            self._render_wrapped_text_lines(text_part_lines[1:], line_height, initial_x_offset=prefix_width + 0.5)
+            
+        self.set_font(original_font_family, original_font_style, original_font_size)
+
+    def add_suggestion(self, suggestion_signal, suggestion_basis, char_wrap_limit=80, line_height=5):
+        self.set_font('Arial', 'B', 11)
+        self.cell(0, 10, f"Trading Suggestion for Tomorrow: {suggestion_signal}", 0, 1, 'L')
+        self.ln(1)
+        
+        original_font_family, original_font_style, original_font_size = self.font_family, self.font_style, self.font_size
+        self.set_font('Arial', '', 10)
+        
+        wrapped_basis = textwrap.wrap(
+            str(suggestion_basis), width=char_wrap_limit, break_long_words=True,
+            replace_whitespace=False, drop_whitespace=False, break_on_hyphens=True,
+            fix_sentence_endings=True
+        )
+        self._render_wrapped_text_lines(wrapped_basis, line_height)
+        
+        self.set_font(original_font_family, original_font_style, original_font_size)
+        self.ln(3)
+
+    def add_metric(self, model_name, metric_name, value):
+        self.set_font('Arial', '', 10)
+        self.cell(0, 6, f"{model_name} - {metric_name}: {value}", 0, 1)
+        self.ln(1)
+
+    def add_plot_image(self, image_path, title, width=170): 
+        if os.path.exists(image_path):
+            approx_image_height = 60 # Rough estimate for plot height + title
+            if self.get_y() + approx_image_height > self.page_break_trigger:
+                self.add_page()
+            self.chapter_title(title)
+            try:
+                self.image(image_path, x=None, y=None, w=width) 
+                self.ln(5)
+            except Exception as e:
+                print(f"Error adding image {image_path} to PDF: {e}")
+                self.chapter_body(f"Error rendering plot: {os.path.basename(image_path)}")
+        else:
+            self.chapter_body(f"Plot not found: {os.path.basename(image_path)}")
+
+    def add_json_dump(self, title: str, data_dict: dict):
+        # ... (same as before) ...
+        self.chapter_title(title)
+        self.set_font("Courier", size=8)
+        try:
+            json_string = json.dumps(data_dict, indent=2)
+        except Exception as e:
+            json_string = f"Error serializing data to JSON: {e}\nRaw data: {str(data_dict)}"
+            self.set_font("Arial", size=8)
+
+        wrapped_json_lines = []
+        for line in json_string.split('\n'):
+            wrapped_json_lines.extend(textwrap.wrap(
+                line, width=90, break_long_words=False, replace_whitespace=False,
+                drop_whitespace=False, subsequent_indent="  "
+            ))
+        for line in wrapped_json_lines:
+            try:
+                self.cell(0, 4, line, 0, 1, 'L') 
+            except fpdf.FPDFException as e: print(f"FPDFException rendering JSON line '{line[:50]}...': {e}. Skipping.")
+        self.ln(5)
+        self.set_font("Arial", size=10)
+    # --- End of helper methods from previous step ---
+
+    def _draw_table_header(self):
+        if not self.table_headers or not self.table_col_widths:
+            return
+        self.set_font('Arial', 'B', 9)
+        current_x = self.get_x() # Save current X, might be LMARGIN
+        for i, header_text in enumerate(self.table_headers):
+            self.cell(self.table_col_widths[i], 7, str(header_text), 1, 0, 'C')
+        self.ln()
+        self.set_x(current_x) # Reset X in case cells shifted it and ln() didn't reset fully
+
+    def add_table(self, headers, data, col_widths=None):
+        page_width = self.w - self.l_margin - self.r_margin
+        
+        # Store headers and calculate/store column widths for potential re-drawing
+        self.table_headers = headers
+        if col_widths:
+            self.table_col_widths = col_widths
+        else:
+            num_cols = len(headers)
+            if num_cols > 0:
+                col_width_val = page_width / num_cols
+                self.table_col_widths = [col_width_val] * num_cols
+            else:
+                self.table_col_widths = []
+                return # No headers, no table
+        
+        # Draw initial header
+        self._draw_table_header()
+        
+        self.set_font('Arial', '', 8)
+        row_height = 6 # Assuming fixed row height for simplicity with `cell`
+
+        for row_data in data:
+            # Check if the current row will fit on the page
+            # Add header height if we are about to break page and need to redraw it
+            header_height_if_new_page = 7 if self.get_y() + row_height > self.page_break_trigger else 0
+            
+            if self.get_y() + row_height + header_height_if_new_page > self.page_break_trigger:
+                self.add_page()
+                self._draw_table_header() # Redraw header on new page
+                self.set_font('Arial', '', 8) # Reset font for data rows
+
+            current_x_start_of_row = self.l_margin # Ensure row starts at left margin
+            self.set_x(current_x_start_of_row)
+
+            for i, item_text in enumerate(row_data):
+                # self.set_xy(current_x_start_of_row + sum(self.table_col_widths[:i]), self.get_y()) # Not needed if using flow
+                self.cell(self.table_col_widths[i], row_height, str(item_text), 1, 0, 'L')
+            self.ln(row_height) # Move to next line, respecting the row_height
+        self.ln(5) # Space after table
+
+
+def generate_prediction_report(run_id: str, report_data: dict, plot_paths: dict):
+    # ... (The rest of this function, calling the PDFReport methods, remains the same)
+    # The key is that the add_table method within the PDFReport class is now improved.
+    # I'll re-paste the call structure for clarity, assuming the methods it calls are updated.
+
+    pdf_filename = f"{run_id}_report.pdf"
+    pdf_filepath = os.path.join(PDF_DIR, pdf_filename)
+
+    pdf = PDFReport() # Uses the updated class
+    pdf.alias_nb_pages()
+    pdf.add_page()
+
+    # 1. Run Information (with disclaimer)
+    pdf.chapter_title("Disclaimer")
+    pdf.chapter_body("This AI-generated analysis is for informational and educational purposes (e.g., Hackathon, College Project) ONLY and is NOT financial advice. Predictions are speculative. Consult a qualified financial advisor before making any investment decisions. Do NOT trust this report for actual trading.", char_wrap_limit=100) # Example disclaimer
+    pdf.ln(3)
+    pdf.chapter_title("Run Information")
+    pdf.chapter_body(f"Report ID: {run_id}")
+    pdf.chapter_body(f"CSV Processed: {report_data.get('csv_filename', 'N/A')}")
+    pdf.chapter_body(f"Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    pdf.ln(5)
+
+
+    # 2. Trading Suggestion
+    trading_suggestion_data = report_data.get('trading_suggestion_tomorrow', {})
+    if trading_suggestion_data and trading_suggestion_data.get('signal') != "N/A":
+        pdf.add_suggestion(
+            trading_suggestion_data.get('signal', 'N/A'),
+            trading_suggestion_data.get('reason', 'N/A')
+        )
+    else:
+        pdf.chapter_title("Trading Suggestion")
+        pdf.chapter_body("No definitive trading suggestion generated for tomorrow.")
+        pdf.ln(5)
+
+    # 3. AI Qualitative Analysis
+    ai_analysis = report_data.get("ai_qualitative_analysis")
+    if isinstance(ai_analysis, dict):
+        pdf.chapter_title("AI Qualitative Analysis (via Gemini)")
+        # ... (Keep your existing detailed rendering of ai_analysis sections) ...
+        pdf.chapter_body(f"Stock Symbol: {ai_analysis.get('stockSymbol', 'N/A')}")
+        pdf.chapter_body(f"Analysis Date: {ai_analysis.get('analysisDate', 'N/A')}")
+        pdf.ln(1)
+        pdf.set_font('Arial', 'B', 10); pdf.cell(0, 6, f"Overall Sentiment: {ai_analysis.get('overallSentiment', 'N/A')}", 0, 1)
+        pdf.chapter_body(f"Rationale: {ai_analysis.get('sentimentRationale', 'N/A')}")
+
+        
+        pdf.ln(3)
+
+        lstm_analysis = ai_analysis.get("lstmModelAnalysis", {})
+        pdf.set_font('Arial', 'BU', 10); pdf.cell(0, 6, "LSTM Model Insights:", 0, 1)
+        pdf.chapter_body(f"Test Performance: {lstm_analysis.get('performanceOnTest', 'N/A')}")
+        pdf.chapter_body(f"Future Outlook: {lstm_analysis.get('futureOutlook', 'N/A')}")
+        pdf.chapter_body(f"Confidence: {lstm_analysis.get('confidenceInOutlook', 'N/A')}")
+        pdf.ln(2)
+
+        poly_analysis = ai_analysis.get("polynomialRegressionAnalysis", {})
+        pdf.set_font('Arial', 'BU', 10); pdf.cell(0, 6, "Polynomial Regression Insights:", 0, 1)
+        pdf.chapter_body(f"Test Performance: {poly_analysis.get('performanceOnTest', 'N/A')}")
+        pdf.chapter_body(f"Future Outlook: {poly_analysis.get('futureOutlook', 'N/A')}")
+        pdf.chapter_body(f"Confidence: {poly_analysis.get('confidenceInOutlook', 'N/A')}")
+        pdf.ln(2)
+        
+        combined_outlook = ai_analysis.get("combinedOutlook", {})
+        pdf.set_font('Arial', 'BU', 10); pdf.cell(0, 6, "Combined Outlook & Observations:", 0, 1)
+        pdf.chapter_body(f"Synopsis: {combined_outlook.get('shortTermForecastSynopsis', 'N/A')}")
+        key_observations = combined_outlook.get("keyObservations", [])
+        if key_observations:
+            pdf.set_font('Arial', 'B', 9); pdf.cell(0, 5, "Key Observations:", 0, 1)
+            for obs in key_observations: pdf.add_observation(obs) 
+        pdf.ln(2)
+
+        risk_factors = ai_analysis.get("riskFactors", [])
+        if risk_factors:
+            pdf.set_font('Arial', 'BU', 10); pdf.cell(0, 6, "Identified Risk Factors:", 0, 1)
+            for risk in risk_factors: pdf.add_observation(risk) 
+        pdf.ln(2)
+        
+        pdf.chapter_body(ai_analysis.get('disclaimer', "Standard AI analysis disclaimer applies."), char_wrap_limit=100)
+        pdf.ln(5)
+    elif isinstance(ai_analysis, str): # Error from Gemini
+        pdf.chapter_title("AI Qualitative Analysis (via Gemini)")
+        pdf.chapter_body(f"Error or non-JSON response during AI Analysis: {ai_analysis}")
+        pdf.ln(5)
+    else:
+        pdf.chapter_title("AI Qualitative Analysis (via Gemini)")
+        pdf.chapter_body("AI analysis was not performed or data is unavailable in expected format.")
+        pdf.ln(5)
+
+
+    # 4. LSTM Numerical Results
+    if "lstm_results" in report_data:
+        pdf.chapter_title("LSTM Model - Numerical Summary")
+        lstm_metrics = report_data["lstm_results"].get("test_metrics", {})
+        pdf.add_metric("LSTM", "Test MAE", f"{lstm_metrics.get('mae', 'N/A'):.4f}")
+        pdf.add_metric("LSTM", "Test R2 Score", f"{lstm_metrics.get('r2_score', 'N/A'):.4f}")
+        pdf.ln(2) # Add some space before the table
+        
+        future_preds_lstm = report_data["lstm_results"].get("future_predictions", {})
+        if future_preds_lstm:
+            pdf.set_font('Arial', 'B', 10); pdf.cell(0, 6, "LSTM Future Predictions (Table):", 0, 1, 'L')
+            headers = ["Date", "Predicted Price (LSTM)"]
+            table_data = [[date, f"{price:.2f}"] for date, price in future_preds_lstm.items()]
+            # Ensure col_widths are appropriate for the content
+            pdf.add_table(headers, table_data, col_widths=[pdf.w * 0.25, pdf.w * 0.25]) # Example: 25% of page width each
+        pdf.ln(3)
+
+    # 5. Polynomial Regression Numerical Results
+    if "polynomial_results" in report_data:
+        pdf.chapter_title("Polynomial Regression - Numerical Summary")
+        poly_metrics = report_data["polynomial_results"].get("test_metrics", {})
+        pdf.add_metric("Polynomial", "Test MAE", f"{poly_metrics.get('mae', 'N/A'):.4f}")
+        pdf.add_metric("Polynomial", "Test R2 Score", f"{poly_metrics.get('r2_score', 'N/A'):.4f}")
+        pdf.ln(2)
+
+        future_preds_poly = report_data["polynomial_results"].get("future_predictions", {})
+        if future_preds_poly:
+            pdf.set_font('Arial', 'B', 10); pdf.cell(0, 6, "Polynomial Future Predictions (Table):", 0, 1, 'L')
+            headers = ["Date", "Predicted Price (Poly)"]
+            table_data = [[date, f"{price:.2f}"] for date, price in future_preds_poly.items()]
+            pdf.add_table(headers, table_data, col_widths=[pdf.w * 0.25, pdf.w * 0.25])
+        pdf.ln(3)
+
+    # 6. Raw JSON Data Summary
+    # ... (same as before, calls pdf.add_json_dump)
+    summary_data_for_json_dump = {
+        "run_id": report_data.get("run_id"),
+        "csv_filename": report_data.get("csv_filename"),
+        "trading_suggestion_tomorrow": report_data.get("trading_suggestion_tomorrow"),
+        "lstm_metrics": report_data.get("lstm_results", {}).get("test_metrics"),
+        "lstm_future_predictions_sample": dict(list(report_data.get("lstm_results", {}).get("future_predictions", {}).items())[:5]),
+        "polynomial_metrics": report_data.get("polynomial_results", {}).get("test_metrics"),
+        "polynomial_future_predictions_sample": dict(list(report_data.get("polynomial_results", {}).get("future_predictions", {}).items())[:5])
+    }
+    if pdf.get_y() + 60 > pdf.page_break_trigger : pdf.add_page() 
+    pdf.add_json_dump("Raw Data Summary (JSON Snippet)", summary_data_for_json_dump)
+
+
+    # 7. Visualizations
+    # ... (same as before, calls pdf.add_plot_image)
+    if plot_paths:
+      if pdf.get_y() + 10 > pdf.page_break_trigger: 
+          pdf.add_page()
+      pdf.chapter_title("Visualizations")
+      # ... (plot image calls)
+      if plot_paths.get("lstm_test_plot"):
+          pdf.add_plot_image(plot_paths["lstm_test_plot"].replace("/static/", "static/"), "LSTM: Test Set Predictions")
+      if plot_paths.get("lstm_future_plot"):
+          pdf.add_plot_image(plot_paths["lstm_future_plot"].replace("/static/", "static/"), "LSTM: Historical, Test & Future Predictions")
+      if plot_paths.get("polynomial_plot"):
+          pdf.add_plot_image(plot_paths["polynomial_plot"].replace("/static/", "static/"), "Polynomial Regression Predictions")
+
+
+    try:
+        pdf.output(pdf_filepath, 'F')
+        print(f"Generated PDF report: {pdf_filepath}")
+    except Exception as e:
+        print(f"Error saving PDF {pdf_filepath}: {e}")
+        raise
+    return pdf_filepath
+
+
+
+
