@@ -6,6 +6,14 @@ FROM python:3.10-slim
 # Set the working directory in the container
 WORKDIR /app
 
+
+
+# Set MPLCONFIGDIR to a writable temporary directory
+ENV MPLCONFIGDIR=/tmp/matplotlib
+
+ENV PYTHONUNBUFFERED=1 
+# For better logging in HF Spaces
+
 # Install system dependencies that might be needed by your Python packages
 # (e.g., some matplotlib backends might need them, but 'Agg' usually doesn't)
 # For now, let's assume no extra system deps are needed beyond what python:3.10-slim provides.
@@ -21,6 +29,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of your application code into the container
 COPY . /app
+
+RUN mkdir -p /app/static/plots && \
+    mkdir -p /app/static/pdfs
 
 # Make sure the directories for plots and PDFs will be writable by the app if created at runtime
 # The os.makedirs(..., exist_ok=True) in your main.py should handle this.
