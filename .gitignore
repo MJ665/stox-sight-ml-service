@@ -1,0 +1,38 @@
+# .gitignore
+
+# Python cache and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+env/
+venv/
+ENV/
+.venv/
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Generated output files (these should NOT be in Git)
+# This will ignore the base directory and everything under it.
+local_stox_sight_outputs/
+# If you were to accidentally create 'data' locally and add it:
+data/ 
+
+# Specific generated directories if you prefer more granular control
+# (The one above is usually sufficient for these generated output folders)
+# static_generated/
+# csvGenerated/ # From your Next.js project if it's in the same repo
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Specific files if needed
+scrap2.json
